@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "esporf"
+version = "0.1.0"
+description = "eSoccer betting data aggregator and edge finder"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.27",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+    "apscheduler>=3.10",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "rich>=13.7",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+discord = ["discord.py>=2.3"]
+telegram = ["python-telegram-bot>=21.0"]
+scraping = ["playwright>=1.40"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.3"]
+
+[project.scripts]
+esporf = "esporf.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["esporf*"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
