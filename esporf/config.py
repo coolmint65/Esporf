@@ -17,16 +17,15 @@ class Settings(BaseSettings):
     league_ids: str = "23114,37298,38439"
 
     # Polling
-    poll_interval: int = 120  # seconds
+    poll_interval: int = 120  # seconds between scans for upcoming matches
 
-    # Edge detection thresholds
-    min_edge_percent: float = 3.0  # minimum EV edge to alert on (%)
-    min_odds_difference: float = 0.10  # minimum decimal odds gap across books
-    clv_lookback_hours: int = 4  # hours of closing line value history
+    # Trend detection thresholds
+    min_hit_rate: float = 0.70  # 70% minimum hit rate to surface a trend
+    min_sample_size: int = 10  # minimum matches needed to consider a trend valid
+    last_n_matches: int = 20  # how many recent matches to analyze per player/H2H
 
-    # Steam move detection
-    steam_move_threshold: float = 0.05  # decimal odds shift to flag as steam
-    steam_move_window_seconds: int = 300  # 5 minute window
+    # Over/under goal lines to check
+    goal_lines: str = "2.5,3.5,4.5,5.5,6.5,7.5"
 
     # Alerts
     discord_webhook_url: str = ""
@@ -35,12 +34,20 @@ class Settings(BaseSettings):
 
     # Data persistence
     data_dir: str = "data"
+    db_path: str = "data/esporf.db"
+
+    # History backfill — pages of ended matches to fetch per league on first run
+    backfill_pages: int = 10
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     @property
     def tracked_league_ids(self) -> list[int]:
         return [int(lid.strip()) for lid in self.league_ids.split(",") if lid.strip()]
+
+    @property
+    def goal_line_values(self) -> list[float]:
+        return [float(v.strip()) for v in self.goal_lines.split(",") if v.strip()]
 
 
 settings = Settings()

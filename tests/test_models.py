@@ -1,76 +1,94 @@
 """Tests for core data models."""
 
-from esporf.models import Edge, League, MarketType, Match, OddsLine, Outcome
+from esporf.models import League, MatchResult, MatchupReport, Trend, UpcomingMatch
 
 
-class TestOddsLine:
-    def test_implied_probability(self):
-        line = OddsLine(sportsbook="Bet365", market=MarketType.MONEYLINE, outcome=Outcome.HOME, odds=2.0)
-        assert line.implied_probability == 0.5
-
-    def test_implied_probability_heavy_favorite(self):
-        line = OddsLine(sportsbook="Bet365", market=MarketType.MONEYLINE, outcome=Outcome.HOME, odds=1.25)
-        assert abs(line.implied_probability - 0.8) < 0.001
-
-    def test_american_odds_positive(self):
-        line = OddsLine(sportsbook="Bet365", market=MarketType.MONEYLINE, outcome=Outcome.HOME, odds=3.0)
-        assert line.american_odds() == "+200"
-
-    def test_american_odds_negative(self):
-        line = OddsLine(sportsbook="Bet365", market=MarketType.MONEYLINE, outcome=Outcome.HOME, odds=1.5)
-        assert line.american_odds() == "-200"
-
-    def test_american_odds_even(self):
-        line = OddsLine(sportsbook="Bet365", market=MarketType.MONEYLINE, outcome=Outcome.HOME, odds=2.0)
-        assert line.american_odds() == "+100"
-
-
-class TestMatch:
-    def _make_match(self) -> Match:
-        return Match(
-            match_id="123",
-            league_id=23114,
-            home="Player A",
-            away="Player B",
-            start_time=1700000000,
-            odds=[
-                OddsLine(sportsbook="Bet365", market=MarketType.MONEYLINE, outcome=Outcome.HOME, odds=2.10),
-                OddsLine(sportsbook="Pinnacle", market=MarketType.MONEYLINE, outcome=Outcome.HOME, odds=2.05),
-                OddsLine(sportsbook="Bet365", market=MarketType.MONEYLINE, outcome=Outcome.AWAY, odds=3.20),
-                OddsLine(sportsbook="Pinnacle", market=MarketType.MONEYLINE, outcome=Outcome.AWAY, odds=3.10),
-            ],
+class TestMatchResult:
+    def _make(self, home_score=3, away_score=1) -> MatchResult:
+        return MatchResult(
+            match_id="123", league_id=23114, home="Player A", away="Player B",
+            home_score=home_score, away_score=away_score, start_time=1700000000,
         )
 
-    def test_league_lookup(self):
-        m = self._make_match()
-        assert m.league == League.GT_LEAGUES_12MIN
+    def test_total_goals(self):
+        assert self._make(3, 2).total_goals == 5
 
+    def test_winner_home(self):
+        assert self._make(3, 1).winner == "Player A"
+
+    def test_winner_away(self):
+        assert self._make(1, 3).winner == "Player B"
+
+    def test_winner_draw(self):
+        assert self._make(2, 2).winner is None
+
+    def test_is_draw(self):
+        assert self._make(2, 2).is_draw is True
+        assert self._make(3, 1).is_draw is False
+
+    def test_btts(self):
+        assert self._make(3, 1).btts is True
+        assert self._make(3, 0).btts is False
+        assert self._make(0, 0).btts is False
+
+    def test_goals_for(self):
+        m = self._make(3, 1)
+        assert m.goals_for("Player A") == 3
+        assert m.goals_for("Player B") == 1
+        assert m.goals_for("Unknown") == 0
+
+    def test_goals_against(self):
+        m = self._make(3, 1)
+        assert m.goals_against("Player A") == 1
+        assert m.goals_against("Player B") == 3
+
+    def test_won_by(self):
+        m = self._make(3, 1)
+        assert m.won_by("Player A") is True
+        assert m.won_by("Player B") is False
+
+    def test_score_str(self):
+        assert self._make(3, 1).score_str() == "3-1"
+
+    def test_league(self):
+        assert self._make().league == League.GT_LEAGUES_12MIN
+
+
+class TestUpcomingMatch:
     def test_display_name(self):
-        m = self._make_match()
-        assert m.display_name == "Player A vs Player B"
+        m = UpcomingMatch(
+            match_id="1", league_id=37298, home="X", away="Y", start_time=0
+        )
+        assert m.display_name == "X vs Y"
+        assert m.league == League.GG_LEAGUE_8MIN
 
-    def test_best_odds(self):
-        m = self._make_match()
-        best = m.best_odds(MarketType.MONEYLINE, Outcome.HOME)
-        assert best is not None
-        assert best.odds == 2.10
-        assert best.sportsbook == "Bet365"
 
-    def test_best_odds_not_found(self):
-        m = self._make_match()
-        best = m.best_odds(MarketType.TOTAL, Outcome.OVER)
-        assert best is None
+class TestTrend:
+    def test_hit_rate_pct(self):
+        t = Trend(
+            category="Over 5.5", description="test", hits=15, sample_size=20,
+            hit_rate=0.75, trend_type="h2h", player_a="A",
+        )
+        assert t.hit_rate_pct == "75%"
+        assert t.record == "15/20"
 
-    def test_odds_by_sportsbook(self):
-        m = self._make_match()
-        books = m.odds_by_sportsbook(MarketType.MONEYLINE, Outcome.HOME)
-        assert len(books) == 2
-        assert books["Bet365"].odds == 2.10
-        assert books["Pinnacle"].odds == 2.05
+
+class TestMatchupReport:
+    def test_has_trends(self):
+        match = UpcomingMatch(
+            match_id="1", league_id=23114, home="A", away="B", start_time=0
+        )
+        assert MatchupReport(match=match, trends=[]).has_trends is False
+
+        trend = Trend(
+            category="test", description="test", hits=8, sample_size=10,
+            hit_rate=0.8, trend_type="h2h", player_a="A",
+        )
+        assert MatchupReport(match=match, trends=[trend]).has_trends is True
 
 
 class TestLeague:
-    def test_display_name(self):
-        assert League.GT_LEAGUES_12MIN.display_name == "eSoccer GT Leagues (12 min)"
-        assert League.GG_LEAGUE_8MIN.display_name == "eSoccer GG League (8 min)"
-        assert League.VOLTA_6MIN.display_name == "eSoccer Volta (6 min)"
+    def test_display_names(self):
+        assert League.GT_LEAGUES_12MIN.display_name == "GT Leagues (12 min)"
+        assert League.GG_LEAGUE_8MIN.display_name == "GG League (8 min)"
+        assert League.VOLTA_6MIN.display_name == "Volta (6 min)"

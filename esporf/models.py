@@ -1,4 +1,4 @@
-"""Core data models for matches, odds, and edges."""
+"""Core data models for match history, player stats, and trend analysis."""
 
 from __future__ import annotations
 
@@ -17,74 +17,47 @@ class League(Enum):
     @property
     def display_name(self) -> str:
         names = {
-            23114: "eSoccer GT Leagues (12 min)",
-            37298: "eSoccer GG League (8 min)",
-            38439: "eSoccer Volta (6 min)",
+            23114: "GT Leagues (12 min)",
+            37298: "GG League (8 min)",
+            38439: "Volta (6 min)",
         }
         return names.get(self.value, f"League {self.value}")
 
 
-class MarketType(Enum):
-    """Supported betting market types."""
-
-    MONEYLINE = "moneyline"  # 1X2
-    SPREAD = "spread"  # handicap
-    TOTAL = "total"  # over/under
-    BTTS = "btts"  # both teams to score
-
-
-class Outcome(Enum):
-    HOME = "home"
-    DRAW = "draw"
-    AWAY = "away"
-    OVER = "over"
-    UNDER = "under"
-    YES = "yes"
-    NO = "no"
-
-
 @dataclass
-class OddsLine:
-    """A single odds line from a specific sportsbook."""
-
-    sportsbook: str
-    market: MarketType
-    outcome: Outcome
-    odds: float  # decimal odds
-    line: float | None = None  # spread/total value (e.g. -1.5, 2.5)
-    timestamp: float = field(default_factory=time.time)
-
-    @property
-    def implied_probability(self) -> float:
-        """Convert decimal odds to implied probability."""
-        if self.odds <= 0:
-            return 0.0
-        return 1.0 / self.odds
-
-    def american_odds(self) -> str:
-        """Convert decimal odds to American format."""
-        if self.odds >= 2.0:
-            american = round((self.odds - 1) * 100)
-            return f"+{american}"
-        elif self.odds > 1.0:
-            american = round(-100 / (self.odds - 1))
-            return str(american)
-        return "+100"
-
-
-@dataclass
-class Match:
-    """An eSoccer match with metadata."""
+class MatchResult:
+    """A completed eSoccer match with final scores."""
 
     match_id: str
     league_id: int
     home: str
     away: str
+    home_score: int
+    away_score: int
     start_time: int  # unix timestamp
-    is_live: bool = False
-    home_score: int | None = None
-    away_score: int | None = None
-    odds: list[OddsLine] = field(default_factory=list)
+    ht_home_score: int | None = None
+    ht_away_score: int | None = None
+
+    @property
+    def total_goals(self) -> int:
+        return self.home_score + self.away_score
+
+    @property
+    def winner(self) -> str | None:
+        if self.home_score > self.away_score:
+            return self.home
+        elif self.away_score > self.home_score:
+            return self.away
+        return None  # draw
+
+    @property
+    def is_draw(self) -> bool:
+        return self.home_score == self.away_score
+
+    @property
+    def btts(self) -> bool:
+        """Both teams to score."""
+        return self.home_score > 0 and self.away_score > 0
 
     @property
     def league(self) -> League | None:
@@ -93,63 +66,87 @@ class Match:
         except ValueError:
             return None
 
+    def goals_for(self, player: str) -> int:
+        """Goals scored by a specific player in this match."""
+        if player == self.home:
+            return self.home_score
+        elif player == self.away:
+            return self.away_score
+        return 0
+
+    def goals_against(self, player: str) -> int:
+        """Goals conceded by a specific player in this match."""
+        if player == self.home:
+            return self.away_score
+        elif player == self.away:
+            return self.home_score
+        return 0
+
+    def won_by(self, player: str) -> bool:
+        return self.winner == player
+
+    def score_str(self) -> str:
+        return f"{self.home_score}-{self.away_score}"
+
+
+@dataclass
+class UpcomingMatch:
+    """An upcoming/live match that we want to find trends for."""
+
+    match_id: str
+    league_id: int
+    home: str
+    away: str
+    start_time: int
+    is_live: bool = False
+
     @property
     def display_name(self) -> str:
         return f"{self.home} vs {self.away}"
 
-    def best_odds(self, market: MarketType, outcome: Outcome) -> OddsLine | None:
-        """Get the best (highest) odds for a given market/outcome."""
-        matching = [
-            o for o in self.odds if o.market == market and o.outcome == outcome
-        ]
-        if not matching:
+    @property
+    def league(self) -> League | None:
+        try:
+            return League(self.league_id)
+        except ValueError:
             return None
-        return max(matching, key=lambda o: o.odds)
-
-    def odds_by_sportsbook(
-        self, market: MarketType, outcome: Outcome
-    ) -> dict[str, OddsLine]:
-        """Get odds grouped by sportsbook for a given market/outcome."""
-        result: dict[str, OddsLine] = {}
-        for o in self.odds:
-            if o.market == market and o.outcome == outcome:
-                result[o.sportsbook] = o
-        return result
 
 
 @dataclass
-class Edge:
-    """A detected betting edge / sharp opportunity."""
+class Trend:
+    """A statistical trend that meets the minimum hit rate threshold.
 
-    match: Match
-    edge_type: str  # e.g. "line_discrepancy", "steam_move", "clv", "model_edge"
-    market: MarketType
-    outcome: Outcome
-    best_book: str
-    best_odds: float
-    fair_odds: float  # estimated true probability as decimal odds
-    edge_percent: float  # EV edge as percentage
-    line: float | None = None
-    details: str = ""
-    timestamp: float = field(default_factory=time.time)
+    Example: "Player A vs Player B - Over 5.5 goals in 15/20 matches (75%)"
+    """
 
-    @property
-    def implied_prob(self) -> float:
-        return 1.0 / self.best_odds if self.best_odds > 0 else 0
+    category: str  # e.g. "Over 5.5 Goals", "BTTS - Yes", "Home Win"
+    description: str  # human-readable full description
+    hits: int  # number of times the trend hit
+    sample_size: int  # total matches analyzed
+    hit_rate: float  # hits / sample_size (0.0 - 1.0)
+    trend_type: str  # "h2h", "player_overall", "player_home", "player_away"
+    player_a: str  # primary player
+    player_b: str | None = None  # opponent (for H2H trends)
+    league_id: int | None = None
+    recent_results: list[str] = field(default_factory=list)  # e.g. ["4-2","3-1","5-0"]
 
     @property
-    def fair_prob(self) -> float:
-        return 1.0 / self.fair_odds if self.fair_odds > 0 else 0
+    def hit_rate_pct(self) -> str:
+        return f"{self.hit_rate:.0%}"
+
+    @property
+    def record(self) -> str:
+        return f"{self.hits}/{self.sample_size}"
 
 
 @dataclass
-class OddsSnapshot:
-    """A point-in-time snapshot of odds for historical tracking."""
+class MatchupReport:
+    """All qualifying trends for an upcoming matchup, sent as an alert."""
 
-    match_id: str
-    market: MarketType
-    outcome: Outcome
-    sportsbook: str
-    odds: float
-    line: float | None
-    timestamp: float = field(default_factory=time.time)
+    match: UpcomingMatch
+    trends: list[Trend]
+    generated_at: float = field(default_factory=time.time)
+
+    @property
+    def has_trends(self) -> bool:
+        return len(self.trends) > 0

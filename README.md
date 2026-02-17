@@ -1,54 +1,69 @@
-# Esporf — eSoccer Betting Edge Finder
+# Esporf — eSoccer Trend Finder
 
-Aggregates odds data from multiple sportsbooks for eSoccer leagues and identifies sharp betting edges.
+Scrapes all match results from eSoccer leagues, stores them in a database, and surfaces high-confidence betting trends when players face off.
+
+**Example output:** "Player A vs Player B — Over 5.5 goals in 15/20 matches (75%)" — anything hitting 70%+ gets sent to Discord.
 
 ## Tracked Leagues
 
 | League | Format | BetsAPI ID |
 |--------|--------|------------|
-| eSoccer GT Leagues | 12 min | 23114 |
-| eSoccer GG League | 8 min | 37298 |
-| eSoccer Volta | 6 min | 38439 |
+| GT Leagues | 12 min | 23114 |
+| GG League | 8 min | 37298 |
+| Volta | 6 min | 38439 |
 
-## Edge Detection Strategies
+## How It Works
 
-1. **Line Discrepancy** — Finds outlier odds at soft books compared to the sharp market consensus (Pinnacle/Bet365 devigged)
-2. **Steam Moves** — Detects rapid line movements at sharp books and flags soft books that haven't adjusted
-3. **CLV (Closing Line Value)** — Tracks odds movements over time and identifies books lagging behind the market trend
-4. **Stats Model** — Uses historical player stats (goals scored/conceded, win rate) to estimate fair match probabilities and flags mispriced odds
+1. **Backfills** historical match results from BetsAPI into a local SQLite database
+2. **Polls** for upcoming matches every 2 minutes
+3. For each upcoming matchup, **analyzes** the players' history:
+   - **Head-to-Head trends** — what happens when these two specifically face each other
+   - **Player overall trends** — how a player performs across all opponents
+   - **Home/Away splits** — performance differences by side
+4. **Filters** for trends hitting 70%+ over the last 20 matches (configurable)
+5. **Sends alerts** to Discord/Telegram with the qualifying trends
+
+## Trend Categories Checked
+
+- Over/Under X.5 total goals (2.5, 3.5, 4.5, 5.5, 6.5, 7.5)
+- Over/Under X.5 player goals scored (0.5, 1.5, 2.5, 3.5)
+- Over/Under X.5 player goals conceded
+- Both Teams to Score (BTTS) Yes/No
+- Player win rate
+- Clean sheet rate
+- H2H-specific versions of all the above
 
 ## Setup
 
 ```bash
-# Clone and install
-git clone <repo-url> && cd Esporf
 pip install -e ".[dev]"
-
-# Configure
 cp .env.example .env
-# Edit .env with your BetsAPI token (get one at https://betsapi.com — $10/mo)
+# Edit .env — add your BetsAPI token (get one at https://betsapi.com — $10/mo)
 ```
 
 ## Usage
 
 ```bash
-# Run continuous scanning bot
+# Backfill historical data (run once)
+esporf backfill --pages 20
+
+# Start continuous scanning bot
 esporf run
 
 # Run a single scan
 esporf scan
 
-# View current odds for all tracked matches
-esporf odds
+# Look up a specific player's trends
+esporf player "PlayerName"
 
-# View cached player statistics
-esporf stats
+# Check head-to-head between two players
+esporf h2h "Player A" "Player B"
 
-# With debug logging
+# View database stats
+esporf db
+
+# Debug mode
 esporf -v run
-
-# Custom poll interval (seconds)
-esporf run --interval 60
 ```
 
 ## Configuration (.env)
@@ -56,36 +71,30 @@ esporf run --interval 60
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BETSAPI_TOKEN` | — | Your BetsAPI token (required) |
-| `LEAGUE_IDS` | `23114,37298,38439` | Comma-separated BetsAPI league IDs |
+| `LEAGUE_IDS` | `23114,37298,38439` | Comma-separated league IDs |
 | `POLL_INTERVAL` | `120` | Seconds between scans |
-| `MIN_EDGE_PERCENT` | `3.0` | Minimum EV% to alert |
-| `MIN_ODDS_DIFFERENCE` | `0.10` | Minimum decimal odds gap |
-| `CLV_LOOKBACK_HOURS` | `4` | Hours of history for CLV analysis |
+| `MIN_HIT_RATE` | `0.70` | Minimum trend hit rate (70%) |
+| `MIN_SAMPLE_SIZE` | `10` | Minimum matches for a valid trend |
+| `LAST_N_MATCHES` | `20` | How many recent matches to analyze |
+| `GOAL_LINES` | `2.5,3.5,4.5,5.5,6.5,7.5` | Goal lines to check |
+| `BACKFILL_PAGES` | `10` | Pages of history to fetch on first run |
 | `DISCORD_WEBHOOK_URL` | — | Discord webhook for alerts |
-| `TELEGRAM_BOT_TOKEN` | — | Telegram bot token for alerts |
-| `TELEGRAM_CHAT_ID` | — | Telegram chat ID for alerts |
-
-## Data Sources
-
-- **BetsAPI** ($10/mo) — Primary source for odds from Bet365, Pinnacle, and other books
-- **Sofascore** (free) — Supplemental live scores and match data
-- **TotalCorner** (free) — Player statistics, over/under rates, corner stats
+| `TELEGRAM_BOT_TOKEN` | — | Telegram bot token |
+| `TELEGRAM_CHAT_ID` | — | Telegram chat ID |
 
 ## Project Structure
 
 ```
 esporf/
-├── models.py              # Core data models (Match, OddsLine, Edge)
+├── models.py              # MatchResult, UpcomingMatch, Trend, MatchupReport
 ├── config.py              # Settings from .env
+├── database.py            # SQLite match history store
 ├── bot.py                 # Main polling loop
 ├── cli.py                 # CLI entry point
 ├── sources/
-│   ├── betsapi.py         # BetsAPI client (odds)
-│   ├── scrapers.py        # Sofascore + TotalCorner scrapers (stats)
-│   └── aggregator.py      # Combines all sources
+│   └── betsapi.py         # BetsAPI client (match results + upcoming)
 ├── analysis/
-│   ├── odds_math.py       # Vig removal, EV calc, Kelly criterion
-│   └── edge_detector.py   # Edge detection engine
+│   └── trends.py          # Trend analyzer (H2H, player, home/away)
 └── alerts/
     ├── console.py         # Rich terminal output
     └── webhooks.py        # Discord/Telegram alerts
@@ -95,5 +104,5 @@ esporf/
 
 ```bash
 pip install -e ".[dev]"
-pytest
+python -m pytest -v
 ```

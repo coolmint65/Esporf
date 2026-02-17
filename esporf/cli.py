@@ -1,4 +1,4 @@
-"""CLI entry point for the Esporf bot."""
+"""CLI entry point for the Esporf trend bot."""
 
 from __future__ import annotations
 
@@ -25,7 +25,8 @@ def setup_logging(verbose: bool = False) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="esporf",
-        description="eSoccer betting data aggregator and edge finder",
+        description="eSoccer trend finder — scrapes match history and surfaces "
+        "high-confidence betting trends",
     )
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable debug logging"
@@ -36,19 +37,35 @@ def main() -> None:
     # `esporf run` — start the continuous bot
     run_parser = subparsers.add_parser("run", help="Start the bot in continuous mode")
     run_parser.add_argument(
-        "--interval",
-        type=int,
-        help="Override poll interval in seconds",
+        "--interval", type=int, help="Override poll interval in seconds"
     )
 
-    # `esporf scan` — run a single scan
+    # `esporf scan` — single scan and exit
     subparsers.add_parser("scan", help="Run a single scan and exit")
 
-    # `esporf odds` — show current odds for all matches
-    subparsers.add_parser("odds", help="Show current odds for all tracked matches")
+    # `esporf backfill` — populate the DB without scanning
+    backfill_parser = subparsers.add_parser(
+        "backfill", help="Fetch historical match data into the database"
+    )
+    backfill_parser.add_argument(
+        "--pages", type=int, default=10, help="Number of pages to fetch per league"
+    )
 
-    # `esporf stats` — show cached player stats
-    subparsers.add_parser("stats", help="Show cached player statistics")
+    # `esporf player` — look up a specific player
+    player_parser = subparsers.add_parser(
+        "player", help="Show a player's recent matches and trends"
+    )
+    player_parser.add_argument("name", help="Player name to look up")
+
+    # `esporf h2h` — head-to-head lookup
+    h2h_parser = subparsers.add_parser(
+        "h2h", help="Show head-to-head history and trends between two players"
+    )
+    h2h_parser.add_argument("player_a", help="First player name")
+    h2h_parser.add_argument("player_b", help="Second player name")
+
+    # `esporf db` — database stats
+    subparsers.add_parser("db", help="Show database statistics")
 
     args = parser.parse_args()
     setup_logging(args.verbose)
@@ -71,104 +88,132 @@ def main() -> None:
 
         asyncio.run(scan_once())
 
-    elif args.command == "odds":
-        asyncio.run(_show_odds())
+    elif args.command == "backfill":
+        asyncio.run(_backfill(args.pages))
 
-    elif args.command == "stats":
-        asyncio.run(_show_stats())
+    elif args.command == "player":
+        _player_lookup(args.name)
+
+    elif args.command == "h2h":
+        _h2h_lookup(args.player_a, args.player_b)
+
+    elif args.command == "db":
+        _db_stats()
 
 
-async def _show_odds() -> None:
-    """Fetch and display current odds for all matches."""
-    from rich.table import Table
+async def _backfill(pages: int) -> None:
+    from esporf.config import settings
+    from esporf.database import MatchDatabase
+    from esporf.sources.betsapi import BetsAPIClient
 
-    from esporf.sources.aggregator import DataAggregator
-
-    agg = DataAggregator()
+    api = BetsAPIClient()
+    db = MatchDatabase()
     try:
-        with console.status("Fetching matches..."):
-            matches = await agg.get_all_matches()
+        console.print(f"[bold]Backfilling {pages} pages per league...[/bold]")
+        for lid in settings.tracked_league_ids:
+            console.print(f"  League {lid}...")
+            matches = await api.backfill_history(lid, pages=pages)
+            added = db.insert_many(matches)
+            console.print(f"    Fetched {len(matches)}, added {added} new")
+        console.print(
+            f"\n[bold green]Done. Total: {db.total_matches():,} matches in DB[/bold green]"
+        )
+    finally:
+        await api.close()
+        db.close()
 
+
+def _player_lookup(name: str) -> None:
+    from esporf.alerts.console import display_matchup_report, display_player_stats
+    from esporf.analysis.trends import TrendAnalyzer
+    from esporf.database import MatchDatabase
+    from esporf.models import UpcomingMatch
+
+    db = MatchDatabase()
+    try:
+        matches = db.get_player_matches(name, limit=20)
         if not matches:
-            console.print("[yellow]No matches found.[/yellow]")
+            console.print(f"[yellow]No matches found for '{name}'[/yellow]")
+            console.print("[dim]Player names are case-sensitive. Check spelling.[/dim]")
+            players = db.get_all_players()
+            close = [p for p in players if name.lower() in p.lower()]
+            if close:
+                console.print(f"[dim]Did you mean: {', '.join(close[:10])}?[/dim]")
             return
 
-        for em in matches:
-            m = em.match
-            table = Table(
-                title=f"{m.display_name} ({'LIVE' if m.is_live else 'Upcoming'})",
-                show_lines=True,
-            )
-            table.add_column("Market")
-            table.add_column("Outcome")
-            table.add_column("Book")
-            table.add_column("Odds", justify="right")
-            table.add_column("American", justify="right")
-            table.add_column("Implied %", justify="right")
+        display_player_stats(name, matches)
 
-            for o in sorted(m.odds, key=lambda x: (x.market.value, x.outcome.value)):
-                pick = o.outcome.value
-                if o.line is not None:
-                    pick += f" {o.line}"
-                table.add_row(
-                    o.market.value,
-                    pick,
-                    o.sportsbook,
-                    f"{o.odds:.2f}",
-                    o.american_odds(),
-                    f"{o.implied_probability:.1%}",
-                )
-
-            console.print(table)
-            console.print()
+        # Also show overall trends
+        analyzer = TrendAnalyzer(db)
+        dummy_match = UpcomingMatch(
+            match_id="lookup", league_id=0, home=name, away="(any)", start_time=0
+        )
+        report = analyzer.analyze_matchup(dummy_match)
+        if report.has_trends:
+            console.print(f"\n[bold]Qualifying trends for {name}:[/bold]")
+            display_matchup_report(report)
     finally:
-        await agg.close()
+        db.close()
 
 
-async def _show_stats() -> None:
-    """Show cached player stats from TotalCorner."""
-    from rich.table import Table
+def _h2h_lookup(player_a: str, player_b: str) -> None:
+    from esporf.alerts.console import display_matchup_report, display_player_stats
+    from esporf.analysis.trends import TrendAnalyzer
+    from esporf.database import MatchDatabase
+    from esporf.models import UpcomingMatch
 
-    from esporf.sources.aggregator import DataAggregator
-
-    agg = DataAggregator()
+    db = MatchDatabase()
     try:
-        with console.status("Fetching player stats..."):
-            await agg.refresh_stats_cache()
-
-        if not agg._stats_cache:
-            console.print("[yellow]No stats available.[/yellow]")
+        matches = db.get_h2h_matches(player_a, player_b, limit=20)
+        if not matches:
+            console.print(
+                f"[yellow]No H2H matches found between '{player_a}' and '{player_b}'[/yellow]"
+            )
             return
 
-        table = Table(title="Player Statistics", show_lines=True)
-        table.add_column("Player")
-        table.add_column("P", justify="right")
-        table.add_column("W", justify="right")
-        table.add_column("D", justify="right")
-        table.add_column("L", justify="right")
-        table.add_column("Win %", justify="right")
-        table.add_column("GF/G", justify="right")
-        table.add_column("GA/G", justify="right")
-        table.add_column("Avg Total", justify="right")
+        console.print(f"\n[bold]H2H: {player_a} vs {player_b} ({len(matches)} matches)[/bold]")
+        display_player_stats(f"{player_a} vs {player_b}", matches)
 
-        for name, ps in sorted(
-            agg._stats_cache.items(), key=lambda x: x[1].win_rate, reverse=True
-        ):
-            table.add_row(
-                ps.name,
-                str(ps.matches_played),
-                str(ps.wins),
-                str(ps.draws),
-                str(ps.losses),
-                f"{ps.win_rate:.0%}",
-                f"{ps.avg_goals_scored:.1f}",
-                f"{ps.avg_goals_conceded:.1f}",
-                f"{ps.avg_total_goals:.1f}",
-            )
-
-        console.print(table)
+        # Show H2H trends
+        analyzer = TrendAnalyzer(db)
+        dummy_match = UpcomingMatch(
+            match_id="lookup",
+            league_id=matches[0].league_id,
+            home=player_a,
+            away=player_b,
+            start_time=0,
+        )
+        report = analyzer.analyze_matchup(dummy_match)
+        if report.has_trends:
+            console.print(f"\n[bold]Qualifying trends:[/bold]")
+            display_matchup_report(report)
+        else:
+            console.print("[yellow]No trends meeting the threshold.[/yellow]")
     finally:
-        await agg.close()
+        db.close()
+
+
+def _db_stats() -> None:
+    from esporf.config import settings
+    from esporf.database import MatchDatabase
+    from esporf.models import League
+
+    db = MatchDatabase()
+    try:
+        total = db.total_matches()
+        console.print(f"\n[bold]Database: {db.db_path}[/bold]")
+        console.print(f"  Total matches: {total:,}")
+        for lid in settings.tracked_league_ids:
+            count = db.total_matches_for_league(lid)
+            try:
+                name = League(lid).display_name
+            except ValueError:
+                name = f"League {lid}"
+            console.print(f"  {name}: {count:,}")
+        players = db.get_all_players()
+        console.print(f"  Unique players: {len(players)}")
+    finally:
+        db.close()
 
 
 if __name__ == "__main__":

@@ -1,10 +1,11 @@
-"""Main bot loop that polls for matches, detects edges, and sends alerts.
+"""Main bot loop — polls for upcoming matches, analyzes trends, sends alerts.
 
-This is the core scheduler that runs continuously:
-1. Fetches all upcoming/live eSoccer matches across tracked leagues
-2. Enriches them with odds from multiple sportsbooks
-3. Runs edge detection (line discrepancy, steam moves, CLV, model)
-4. Outputs results to console and sends webhook alerts
+Workflow:
+1. On first run, backfill match history from BetsAPI into SQLite
+2. Every cycle: fetch newly ended matches and add to DB
+3. Fetch upcoming/live matches
+4. Run trend analysis on each matchup
+5. Display results and send webhook alerts for qualifying trends
 """
 
 from __future__ import annotations
@@ -12,70 +13,129 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
-import sys
 from datetime import datetime
 
 from rich.console import Console
-from rich.live import Live
-from rich.spinner import Spinner
 
-from esporf.alerts.console import display_edges, display_scan_summary
+from esporf.alerts.console import display_matchup_report, display_scan_summary
 from esporf.alerts.webhooks import send_alerts
-from esporf.analysis.edge_detector import EdgeDetector
+from esporf.analysis.trends import TrendAnalyzer
 from esporf.config import settings
-from esporf.sources.aggregator import DataAggregator
+from esporf.database import MatchDatabase
+from esporf.models import MatchupReport
+from esporf.sources.betsapi import BetsAPIClient
 
 logger = logging.getLogger(__name__)
 console = Console()
 
 
 class EsporfBot:
-    """The main bot that orchestrates data collection and edge detection."""
+    """The main bot that collects data, finds trends, and sends alerts."""
 
     def __init__(self):
-        self.aggregator = DataAggregator()
-        self.detector = EdgeDetector()
+        self.api = BetsAPIClient()
+        self.db = MatchDatabase()
+        self.analyzer = TrendAnalyzer(self.db)
         self._running = False
         self._scan_count = 0
-        self._total_edges_found = 0
+        self._alerted_match_ids: set[str] = set()
 
-    async def scan_once(self) -> int:
-        """Run a single scan cycle. Returns number of edges found."""
+    async def backfill(self) -> None:
+        """Fetch historical match data to populate the database on first run."""
+        if self.db.total_matches() > 0:
+            console.print(
+                f"[dim]Database already has {self.db.total_matches():,} matches. "
+                f"Fetching latest results...[/dim]"
+            )
+            # Just grab page 1 of ended matches to stay current
+            for lid in settings.tracked_league_ids:
+                try:
+                    matches = await self.api.get_ended_matches(lid, page=1)
+                    added = self.db.insert_many(matches)
+                    if added:
+                        logger.info("Added %d new results for league %d", added, lid)
+                except Exception as e:
+                    logger.warning("Failed to update league %d: %s", lid, e)
+            return
+
+        # First run — full backfill
+        console.print("[bold]First run — backfilling match history...[/bold]")
+        pages = settings.backfill_pages
+        for lid in settings.tracked_league_ids:
+            console.print(f"  Fetching league {lid} ({pages} pages)...")
+            try:
+                matches = await self.api.backfill_history(lid, pages=pages)
+                added = self.db.insert_many(matches)
+                console.print(f"    Added {added} matches for league {lid}")
+            except Exception as e:
+                console.print(f"    [red]Failed: {e}[/red]")
+
+        console.print(
+            f"[bold green]Backfill complete: {self.db.total_matches():,} matches in DB[/bold green]\n"
+        )
+
+    async def scan_once(self) -> list[MatchupReport]:
+        """Run a single scan cycle. Returns reports with qualifying trends."""
         self._scan_count += 1
         timestamp = datetime.now().strftime("%H:%M:%S")
         console.print(f"\n[dim]── Scan #{self._scan_count} at {timestamp} ──[/dim]")
 
-        # Refresh stats cache periodically (every 10 scans)
-        if self._scan_count % 10 == 1:
-            with console.status("Refreshing player stats..."):
-                await self.aggregator.refresh_stats_cache()
+        # Update DB with latest ended matches
+        for lid in settings.tracked_league_ids:
+            try:
+                ended = await self.api.get_ended_matches(lid, page=1)
+                added = self.db.insert_many(ended)
+                if added:
+                    logger.info("Added %d new results for league %d", added, lid)
+            except Exception as e:
+                logger.warning("Failed to fetch ended matches for league %d: %s", lid, e)
 
-        # Fetch all matches with odds
-        with console.status("Fetching matches and odds..."):
-            enriched_matches = await self.aggregator.get_all_matches()
+        # Fetch upcoming matches
+        all_upcoming = []
+        for lid in settings.tracked_league_ids:
+            try:
+                upcoming = await self.api.get_upcoming_matches(lid)
+                inplay = await self.api.get_inplay_matches(lid)
+                all_upcoming.extend(upcoming)
+                all_upcoming.extend(inplay)
+            except Exception as e:
+                logger.warning("Failed to fetch upcoming for league %d: %s", lid, e)
 
-        if not enriched_matches:
-            console.print("[yellow]No matches found. Will retry next cycle.[/yellow]")
-            return 0
+        if not all_upcoming:
+            console.print("[yellow]No upcoming matches found. Will retry next cycle.[/yellow]")
+            return []
 
-        # Run edge detection
-        edges = self.detector.analyze_all(enriched_matches)
+        # Analyze each matchup for trends
+        reports: list[MatchupReport] = []
+        for match in all_upcoming:
+            report = self.analyzer.analyze_matchup(match)
+            reports.append(report)
 
         # Display results
+        reports_with_trends = [r for r in reports if r.has_trends]
+        total_trends = sum(len(r.trends) for r in reports_with_trends)
+
         display_scan_summary(
-            total_matches=len(enriched_matches),
-            total_edges=len(edges),
-            leagues_scanned=len(settings.tracked_league_ids),
+            total_matches=len(all_upcoming),
+            matches_with_trends=len(reports_with_trends),
+            total_trends=total_trends,
+            db_total=self.db.total_matches(),
         )
 
-        if edges:
-            display_edges(edges)
-            self._total_edges_found += len(edges)
+        for report in reports:
+            display_matchup_report(report)
 
-            # Send webhook alerts
-            await send_alerts(edges)
+        # Send alerts for NEW matchups only (avoid spamming same matchup)
+        new_reports = [
+            r for r in reports_with_trends
+            if r.match.match_id not in self._alerted_match_ids
+        ]
+        if new_reports:
+            await send_alerts(new_reports)
+            for r in new_reports:
+                self._alerted_match_ids.add(r.match.match_id)
 
-        return len(edges)
+        return reports_with_trends
 
     async def run(self) -> None:
         """Run the bot in a continuous polling loop."""
@@ -83,14 +143,19 @@ class EsporfBot:
         interval = settings.poll_interval
 
         console.print(
-            f"[bold blue]Esporf Bot Starting[/bold blue]\n"
+            f"[bold blue]Esporf Trend Bot Starting[/bold blue]\n"
             f"  Tracking leagues: {settings.league_ids}\n"
             f"  Poll interval: {interval}s\n"
-            f"  Min edge: {settings.min_edge_percent}%\n"
+            f"  Min hit rate: {settings.min_hit_rate:.0%}\n"
+            f"  Min sample size: {settings.min_sample_size}\n"
+            f"  Goal lines: {settings.goal_lines}\n"
             f"  Press Ctrl+C to stop\n"
         )
 
-        # Set up signal handlers for graceful shutdown
+        # Backfill history on startup
+        await self.backfill()
+
+        # Set up signal handlers
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self._shutdown)
@@ -104,31 +169,28 @@ class EsporfBot:
                     console.print(f"[red]Scan error: {e}[/red]")
 
                 if self._running:
-                    console.print(
-                        f"[dim]Next scan in {interval}s... "
-                        f"(total edges found: {self._total_edges_found})[/dim]"
-                    )
+                    console.print(f"[dim]Next scan in {interval}s...[/dim]")
                     await asyncio.sleep(interval)
         finally:
-            await self.aggregator.close()
+            await self.api.close()
+            self.db.close()
             console.print("\n[bold]Bot stopped.[/bold]")
 
     def _shutdown(self) -> None:
-        """Handle graceful shutdown."""
         console.print("\n[yellow]Shutting down...[/yellow]")
         self._running = False
 
 
 async def run_bot() -> None:
-    """Entry point to start the bot."""
     bot = EsporfBot()
     await bot.run()
 
 
 async def scan_once() -> None:
-    """Run a single scan (useful for testing/cron)."""
     bot = EsporfBot()
     try:
+        await bot.backfill()
         await bot.scan_once()
     finally:
-        await bot.aggregator.close()
+        await bot.api.close()
+        bot.db.close()
