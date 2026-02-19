@@ -505,19 +505,23 @@ class MatchupReport:
     def _best_bet_estimated(
         self, market_groups: dict[str, list[Trend]]
     ) -> BetPick | None:
-        """Fallback: pick the best bet using estimated implied probabilities."""
-        collapsed = _collapse_to_tightest_lines(market_groups)
+        """Fallback: pick the best bet using estimated implied probabilities.
 
+        All qualifying lines compete on their merits — hit rate, number of
+        supporting trends, sample size, and estimated edge.  Lines where the
+        book's implied probability exceeds 64 % are filtered out (too expensive
+        to bet).
+        """
         max_implied = 0.64
         filtered: dict[str, list[Trend]] = {}
-        for market, trends in collapsed.items():
+        for market, trends in market_groups.items():
             implied = _estimate_implied_probability(market)
             if implied is not None and implied > max_implied:
                 continue
             filtered[market] = trends
 
         if not filtered:
-            filtered = collapsed
+            filtered = market_groups
 
         best_market: str | None = None
         best_score = 0.0
@@ -527,13 +531,21 @@ class MatchupReport:
             agreement = len(trends)
             avg_rate = sum(t.hit_rate for t in trends) / agreement
             avg_sample = sum(t.sample_size for t in trends) / agreement
-            tightness = _line_tightness(market)
 
+            # Estimated edge: hit_rate minus estimated implied probability
+            implied = _estimate_implied_probability(market)
+            if implied is not None:
+                edge = max(avg_rate - implied, 0.0)
+                edge_norm = min(edge / 0.30, 1.0)  # 30 %+ edge → perfect
+            else:
+                edge_norm = 0.5  # neutral for non-line markets
+
+            # Score: 40 % hit rate, 25 % agreement, 15 % sample, 20 % edge
             score = (
-                avg_rate * 0.35
+                avg_rate * 0.40
                 + min(agreement / 5, 1.0) * 0.25
                 + min(avg_sample / 20, 1.0) * 0.15
-                + tightness * 0.25
+                + edge_norm * 0.20
             )
             if score > best_score:
                 best_score = score
@@ -582,43 +594,6 @@ def _parse_line(market: str) -> tuple[str, float] | None:
         return None
     return m.group(1), float(m.group(2))
 
-
-def _collapse_to_tightest_lines(
-    groups: dict[str, list[Trend]],
-) -> dict[str, list[Trend]]:
-    """For Over/Under total-goals markets, keep only the tightest line.
-
-    "Tightest" = lowest Under line or highest Over line that qualifies,
-    because those correspond to the best available odds.
-    """
-    under_lines: dict[float, tuple[str, list[Trend]]] = {}
-    over_lines: dict[float, tuple[str, list[Trend]]] = {}
-    result: dict[str, list[Trend]] = {}
-
-    for market, trends in groups.items():
-        parsed = _parse_line(market)
-        if parsed is None:
-            result[market] = trends
-            continue
-        direction, line = parsed
-        if direction.lower() == "under":
-            under_lines[line] = (market, trends)
-        else:
-            over_lines[line] = (market, trends)
-
-    # Keep only the tightest Under (lowest line value)
-    if under_lines:
-        tightest = min(under_lines)
-        market, trends = under_lines[tightest]
-        result[market] = trends
-
-    # Keep only the tightest Over (highest line value)
-    if over_lines:
-        tightest = max(over_lines)
-        market, trends = over_lines[tightest]
-        result[market] = trends
-
-    return result
 
 
 def _estimate_implied_probability(market: str) -> float | None:
@@ -680,21 +655,3 @@ def _get_moneyline_implied(
     return None
 
 
-def _line_tightness(market: str) -> float:
-    """Score 0-1 for how tight a line is (tighter = better odds = higher score).
-
-    Non-line markets get 0.5 (neutral).
-    """
-    parsed = _parse_line(market)
-    if parsed is None:
-        return 0.5
-
-    direction, line = parsed
-
-    # Under: lower line = tighter.  Range 2.5-7.5 → map to 1.0-0.0
-    # Over:  higher line = tighter. Range 2.5-7.5 → map to 0.0-1.0
-    normalized = (line - 2.5) / 5.0  # 0.0 at 2.5, 1.0 at 7.5
-    if direction.lower() == "under":
-        return 1.0 - normalized  # Under 2.5 = 1.0, Under 7.5 = 0.0
-    else:
-        return normalized  # Over 7.5 = 1.0, Over 2.5 = 0.0
