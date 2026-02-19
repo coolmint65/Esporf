@@ -1,27 +1,34 @@
-"""BetsAPI client for fetching eSoccer match results and upcoming fixtures.
+"""BetsAPI client for fetching eSoccer match results, upcoming fixtures, and odds.
 
 Primary data source for building match history. Fetches:
 - Ended matches with scores (for historical trend database)
 - Upcoming matches (to know who's playing next and run trend analysis)
 - In-play matches (for live alerting)
+- Event odds (Over/Under lines, moneylines from sportsbooks)
+- Day-based schedule (for longer lookahead)
 
 Docs: https://betsapi.com/docs/
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
 
 from esporf.config import settings
-from esporf.models import MatchResult, UpcomingMatch
+from esporf.models import MatchOdds, MatchResult, MoneylineOdds, OddsLine, UpcomingMatch
 
 logger = logging.getLogger(__name__)
 
 SPORT_ID = 1  # Soccer (eSoccer is categorized under soccer)
+
+# BetsAPI base URL without version prefix (for v1/v2 endpoints)
+_API_ROOT = "https://api.b365api.com"
 
 
 class BetsAPIClient:
@@ -59,6 +66,25 @@ class BetsAPIClient:
         resp = await client.get(endpoint, params=all_params)
         resp.raise_for_status()
         data = resp.json()
+
+        if data.get("success") == 0:
+            error = data.get("error", "Unknown BetsAPI error")
+            raise RuntimeError(f"BetsAPI error: {error}")
+
+        return data
+
+    async def _request_raw(self, url: str, params: dict[str, Any] | None = None) -> dict:
+        """Make a request to a full URL (for v1/v2 endpoints outside the v3 base)."""
+        if not self.token:
+            raise ValueError("BetsAPI token not configured.")
+        all_params = {"token": self.token}
+        if params:
+            all_params.update(params)
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, params=all_params)
+            resp.raise_for_status()
+            data = resp.json()
 
         if data.get("success") == 0:
             error = data.get("error", "Unknown BetsAPI error")
@@ -133,6 +159,165 @@ class BetsAPIClient:
             matches.append(m)
         return matches
 
+    # ── Extended schedule (day-based lookahead) ────────────────────
+
+    async def get_upcoming_by_day(
+        self, league_id: int, day: str | None = None
+    ) -> list[UpcomingMatch]:
+        """Fetch upcoming matches for a specific day (YYYYMMDD format).
+
+        The ``day`` parameter tells BetsAPI to return ALL scheduled events
+        for that calendar day, potentially hours in advance.  Without it,
+        the default endpoint only shows events a few minutes before kickoff.
+
+        If *day* is None, queries today and tomorrow (UTC) to cover timezone
+        boundaries.
+        """
+        all_matches: list[UpcomingMatch] = []
+        seen: set[str] = set()
+
+        if day:
+            days = [day]
+        else:
+            now_utc = datetime.now(tz=timezone.utc)
+            days = [
+                now_utc.strftime("%Y%m%d"),
+                (now_utc + timedelta(days=1)).strftime("%Y%m%d"),
+            ]
+
+        for d in days:
+            try:
+                data = await self._request(
+                    "/events/upcoming",
+                    params={
+                        "sport_id": SPORT_ID,
+                        "league_id": league_id,
+                        "day": d,
+                    },
+                )
+                for ev in data.get("results", []):
+                    m = self._parse_upcoming(ev, league_id)
+                    if m.match_id not in seen:
+                        seen.add(m.match_id)
+                        all_matches.append(m)
+            except Exception as e:
+                logger.warning("Day schedule fetch failed for %s: %s", d, e)
+
+        return all_matches
+
+    async def get_full_schedule(self, league_id: int) -> list[UpcomingMatch]:
+        """Get the broadest possible schedule by combining all sources.
+
+        Merges: day-based upcoming (today + tomorrow) + standard upcoming
+        + in-play. Deduplicates by match ID. This maximizes the lookahead
+        window — if BetsAPI has matches listed hours out, we'll find them.
+        """
+        seen: set[str] = set()
+        all_matches: list[UpcomingMatch] = []
+
+        # 1. Day-based (broadest lookahead)
+        try:
+            day_matches = await self.get_upcoming_by_day(league_id)
+            for m in day_matches:
+                if m.match_id not in seen:
+                    seen.add(m.match_id)
+                    all_matches.append(m)
+        except Exception as e:
+            logger.warning("Day schedule failed for league %d: %s", league_id, e)
+
+        # 2. Standard upcoming (catches anything day-based missed)
+        try:
+            upcoming = await self.get_upcoming_matches(league_id)
+            for m in upcoming:
+                if m.match_id not in seen:
+                    seen.add(m.match_id)
+                    all_matches.append(m)
+        except Exception as e:
+            logger.warning("Upcoming fetch failed for league %d: %s", league_id, e)
+
+        # 3. In-play (catches matches that jumped straight to live)
+        now = int(time.time())
+        try:
+            inplay = await self.get_inplay_matches(league_id)
+            for m in inplay:
+                if m.match_id not in seen:
+                    seen.add(m.match_id)
+                    m.is_live = m.start_time <= now
+                    all_matches.append(m)
+        except Exception as e:
+            logger.warning("Inplay fetch failed for league %d: %s", league_id, e)
+
+        # Sort by start time
+        all_matches.sort(key=lambda m: m.start_time)
+        return all_matches
+
+    # ── Odds ─────────────────────────────────────────────────────────
+
+    async def get_event_odds(self, event_id: str) -> MatchOdds:
+        """Fetch pre-match odds for a specific event.
+
+        Uses the /v2/event/odds endpoint with markets:
+        - 1_3: Over/Under (Goal Line) — the actual lines offered
+        - 1_1: 1X2 (Moneyline)
+
+        Returns a MatchOdds with all available lines and moneyline odds.
+        """
+        odds = MatchOdds()
+
+        # Fetch O/U and 1X2 in one call (comma-separated market IDs)
+        try:
+            data = await self._request_raw(
+                f"{_API_ROOT}/v2/event/odds",
+                params={
+                    "event_id": event_id,
+                    "odds_market": "1_3,1_1",
+                },
+            )
+        except Exception as e:
+            logger.debug("Odds fetch failed for event %s: %s", event_id, e)
+            return odds
+
+        results = data.get("results", {})
+        odds_data = results.get("odds", results)
+
+        # Parse Over/Under lines (market 1_3)
+        for entry in odds_data.get("1_3", []):
+            line = self._parse_ou_odds(entry)
+            if line:
+                odds.total_lines.append(line)
+
+        # Parse 1X2 moneyline (market 1_1)
+        ml_entries = odds_data.get("1_1", [])
+        if ml_entries:
+            ml = self._parse_moneyline(ml_entries[-1])  # latest entry
+            if ml:
+                odds.moneyline = ml
+
+        return odds
+
+    async def fetch_odds_batch(
+        self, matches: list[UpcomingMatch], delay: float = 0.3
+    ) -> None:
+        """Fetch odds for a batch of matches, attaching results to each.
+
+        Adds a small delay between API calls to respect rate limits.
+        Modifies matches in-place by setting their ``odds`` attribute.
+        """
+        for match in matches:
+            try:
+                match.odds = await self.get_event_odds(match.match_id)
+                if match.odds.has_data:
+                    lines = match.odds.available_lines
+                    logger.info(
+                        "Odds for %s: lines=%s", match.display_name, lines
+                    )
+                else:
+                    logger.debug("No odds data for %s", match.display_name)
+            except Exception as e:
+                logger.debug("Odds fetch error for %s: %s", match.display_name, e)
+            if delay > 0:
+                await asyncio.sleep(delay)
+
     # ── Parsing ──────────────────────────────────────────────────────
 
     @staticmethod
@@ -176,6 +361,36 @@ class BetsAPIClient:
             away=away_info.get("name", "Unknown"),
             start_time=int(event.get("time", 0)),
         )
+
+    @staticmethod
+    def _parse_ou_odds(entry: dict) -> OddsLine | None:
+        """Parse a single Over/Under odds entry from BetsAPI."""
+        try:
+            line = float(entry.get("handicap", 0))
+            over = float(entry.get("home_od", 0))
+            under = float(entry.get("away_od", 0))
+            if line > 0 and over > 0 and under > 0:
+                return OddsLine(line=line, over_odds=over, under_odds=under)
+        except (ValueError, TypeError):
+            pass
+        return None
+
+    @staticmethod
+    def _parse_moneyline(entry: dict) -> MoneylineOdds | None:
+        """Parse a 1X2 moneyline odds entry from BetsAPI."""
+        try:
+            home = float(entry.get("home_od", 0))
+            draw = float(entry.get("draw_od", entry.get("neutral_od", 0)))
+            away = float(entry.get("away_od", 0))
+            if home > 0 and away > 0:
+                return MoneylineOdds(
+                    home_odds=home,
+                    draw_odds=draw if draw > 0 else 0.0,
+                    away_odds=away,
+                )
+        except (ValueError, TypeError):
+            pass
+        return None
 
 
 def _safe_int(val: Any) -> int | None:

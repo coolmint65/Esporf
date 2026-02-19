@@ -29,6 +29,106 @@ def _same_player(a: str, b: str) -> bool:
     return extract_handle(a) == extract_handle(b)
 
 
+def _decimal_to_american(decimal_odds: float) -> str:
+    """Convert decimal odds to American format string."""
+    if decimal_odds >= 2.0:
+        american = (decimal_odds - 1) * 100
+        return f"+{american:.0f}"
+    elif decimal_odds > 1.0:
+        american = -100 / (decimal_odds - 1)
+        return f"{american:.0f}"
+    return "N/A"
+
+
+# ── Odds data structures ────────────────────────────────────────
+
+
+@dataclass
+class OddsLine:
+    """A single Over/Under line with odds from a sportsbook."""
+
+    line: float  # e.g. 4.5, 5.5, 8.5
+    over_odds: float  # decimal odds for Over (e.g. 1.85)
+    under_odds: float  # decimal odds for Under (e.g. 1.95)
+    source: str = "bet365"
+
+    @property
+    def over_american(self) -> str:
+        return _decimal_to_american(self.over_odds)
+
+    @property
+    def under_american(self) -> str:
+        return _decimal_to_american(self.under_odds)
+
+    @property
+    def over_implied(self) -> float:
+        """Implied probability of the Over hitting (no-vig)."""
+        return 1.0 / self.over_odds if self.over_odds > 0 else 1.0
+
+    @property
+    def under_implied(self) -> float:
+        """Implied probability of the Under hitting (no-vig)."""
+        return 1.0 / self.under_odds if self.under_odds > 0 else 1.0
+
+
+@dataclass
+class MoneylineOdds:
+    """1X2 moneyline odds for a match."""
+
+    home_odds: float  # decimal
+    draw_odds: float  # decimal
+    away_odds: float  # decimal
+    source: str = "bet365"
+
+    @property
+    def home_american(self) -> str:
+        return _decimal_to_american(self.home_odds)
+
+    @property
+    def draw_american(self) -> str:
+        return _decimal_to_american(self.draw_odds)
+
+    @property
+    def away_american(self) -> str:
+        return _decimal_to_american(self.away_odds)
+
+    @property
+    def home_implied(self) -> float:
+        return 1.0 / self.home_odds if self.home_odds > 0 else 1.0
+
+    @property
+    def draw_implied(self) -> float:
+        return 1.0 / self.draw_odds if self.draw_odds > 0 else 1.0
+
+    @property
+    def away_implied(self) -> float:
+        return 1.0 / self.away_odds if self.away_odds > 0 else 1.0
+
+
+@dataclass
+class MatchOdds:
+    """All available odds for a match, fetched from BetsAPI."""
+
+    total_lines: list[OddsLine] = field(default_factory=list)
+    moneyline: MoneylineOdds | None = None
+
+    def get_line(self, value: float) -> OddsLine | None:
+        """Find a specific O/U line by value (e.g. 4.5)."""
+        for ol in self.total_lines:
+            if ol.line == value:
+                return ol
+        return None
+
+    @property
+    def available_lines(self) -> list[float]:
+        """Sorted list of offered O/U line values."""
+        return sorted(ol.line for ol in self.total_lines)
+
+    @property
+    def has_data(self) -> bool:
+        return len(self.total_lines) > 0 or self.moneyline is not None
+
+
 class League(Enum):
     """Tracked eSoccer leagues with BetsAPI league IDs."""
 
@@ -123,6 +223,7 @@ class UpcomingMatch:
     away: str
     start_time: int
     is_live: bool = False
+    odds: MatchOdds | None = None
 
     @property
     def display_name(self) -> str:
@@ -186,6 +287,9 @@ class BetPick:
     confidence: float  # weighted score combining hit rate + sample size + agreement
     supporting_trends: list[Trend]  # trends that back this pick
     reason: str  # human-readable explanation
+    odds_line: OddsLine | None = None  # actual O/U odds if available
+    moneyline: MoneylineOdds | None = None  # actual 1X2 odds if available
+    edge: float | None = None  # hit_rate - implied_probability (value edge)
 
     @property
     def confidence_pct(self) -> str:
@@ -266,45 +370,152 @@ class MatchupReport:
     def best_bet(self) -> BetPick | None:
         """Pick the single best bet from qualifying trends.
 
-        Key principle: we want the *tightest* line that still qualifies so
-        the odds are actually bettable (targeting -180 or better).
+        When real odds are available (from BetsAPI), we:
+        1. Only consider lines actually offered by the sportsbook
+        2. Use real implied probability instead of estimates
+        3. Score by edge (hit_rate - implied_probability) for maximum value
 
-        For Under markets the tightest = lowest line (Under 3.5 > Under 5.5).
-        For Over  markets the tightest = highest line (Over 5.5 > Over 3.5).
-
-        Non-line markets (Win, Draw, etc.) are scored normally.
-
-        Each candidate is also checked against a rough implied-probability
-        ceiling so we don't recommend something that would be -300+.
+        When no odds are available, falls back to the tightest-line heuristic.
         """
         if not self.trends:
             return None
+
+        odds = self.match.odds
+        has_real_odds = odds is not None and odds.has_data
 
         # Group trends by category (e.g. "Over 5.5 Goals")
         market_groups: dict[str, list[Trend]] = {}
         for t in self.trends:
             market_groups.setdefault(t.category, []).append(t)
 
-        # ── Step 1: collapse Over/Under groups to their tightest line ──
-        # If Under 4.5 and Under 7.5 both qualify, keep only Under 4.5.
-        # If Over 3.5 and Over 2.5 both qualify, keep only Over 3.5.
+        if has_real_odds:
+            return self._best_bet_with_odds(market_groups, odds)
+        return self._best_bet_estimated(market_groups)
+
+    def _best_bet_with_odds(
+        self,
+        market_groups: dict[str, list[Trend]],
+        odds: MatchOdds,
+    ) -> BetPick | None:
+        """Pick the best bet using real sportsbook odds for edge calculation."""
+        best_market: str | None = None
+        best_score = 0.0
+        best_trends: list[Trend] = []
+        best_edge = 0.0
+        best_odds_line: OddsLine | None = None
+        best_ml: MoneylineOdds | None = None
+
+        for market, trends in market_groups.items():
+            parsed = _parse_line(market)
+            agreement = len(trends)
+            avg_rate = sum(t.hit_rate for t in trends) / agreement
+            avg_sample = sum(t.sample_size for t in trends) / agreement
+
+            if parsed:
+                direction, line = parsed
+                odds_line = odds.get_line(line)
+                if not odds_line:
+                    continue  # line not offered by the book — skip it
+
+                if direction.lower() == "over":
+                    implied = odds_line.over_implied
+                else:
+                    implied = odds_line.under_implied
+
+                edge = avg_rate - implied
+                if edge <= 0:
+                    continue  # no value — our hit rate doesn't beat the odds
+
+                # Score: 40% edge, 25% hit rate, 20% agreement, 15% sample
+                edge_norm = min(edge / 0.30, 1.0)  # 30%+ edge = perfect score
+                score = (
+                    edge_norm * 0.40
+                    + avg_rate * 0.25
+                    + min(agreement / 5, 1.0) * 0.20
+                    + min(avg_sample / 20, 1.0) * 0.15
+                )
+                if score > best_score:
+                    best_score = score
+                    best_market = market
+                    best_trends = trends
+                    best_edge = edge
+                    best_odds_line = odds_line
+                    best_ml = None
+            else:
+                # Non-line market (Win, Draw) — use moneyline odds if available
+                ml = odds.moneyline
+                if not ml:
+                    continue
+                implied = _get_moneyline_implied(market, ml, self.match)
+                if implied is None:
+                    continue
+                edge = avg_rate - implied
+                if edge <= 0:
+                    continue
+                edge_norm = min(edge / 0.30, 1.0)
+                score = (
+                    edge_norm * 0.40
+                    + avg_rate * 0.25
+                    + min(agreement / 5, 1.0) * 0.20
+                    + min(avg_sample / 20, 1.0) * 0.15
+                )
+                if score > best_score:
+                    best_score = score
+                    best_market = market
+                    best_trends = trends
+                    best_edge = edge
+                    best_odds_line = None
+                    best_ml = ml
+
+        if best_market is None:
+            return None
+
+        sources = ", ".join(sorted({_trend_source_label(t.trend_type) for t in best_trends}))
+        top_rate = max(t.hit_rate for t in best_trends)
+
+        # Build reason with actual odds
+        odds_str = ""
+        if best_odds_line:
+            parsed = _parse_line(best_market)
+            if parsed:
+                direction = parsed[0]
+                if direction.lower() == "over":
+                    odds_str = f" @ {best_odds_line.over_american}"
+                else:
+                    odds_str = f" @ {best_odds_line.under_american}"
+
+        reason = (
+            f"{best_market}{odds_str} backed by {len(best_trends)} trend(s) "
+            f"({sources}) — {top_rate:.0%} hit rate, {best_edge:.0%} edge"
+        )
+
+        return BetPick(
+            market=best_market,
+            confidence=best_score,
+            supporting_trends=best_trends,
+            reason=reason,
+            odds_line=best_odds_line,
+            moneyline=best_ml,
+            edge=best_edge,
+        )
+
+    def _best_bet_estimated(
+        self, market_groups: dict[str, list[Trend]]
+    ) -> BetPick | None:
+        """Fallback: pick the best bet using estimated implied probabilities."""
         collapsed = _collapse_to_tightest_lines(market_groups)
 
-        # ── Step 2: filter out markets whose implied probability is too
-        #    high (estimated odds worse than -180 → ~64% implied).
         max_implied = 0.64
         filtered: dict[str, list[Trend]] = {}
         for market, trends in collapsed.items():
             implied = _estimate_implied_probability(market)
             if implied is not None and implied > max_implied:
-                continue  # too juicy for the book, odds will be terrible
+                continue
             filtered[market] = trends
 
         if not filtered:
-            # Fall back to the collapsed set if everything was filtered
             filtered = collapsed
 
-        # ── Step 3: score the remaining candidates ──
         best_market: str | None = None
         best_score = 0.0
         best_trends: list[Trend] = []
@@ -313,12 +524,8 @@ class MatchupReport:
             agreement = len(trends)
             avg_rate = sum(t.hit_rate for t in trends) / agreement
             avg_sample = sum(t.sample_size for t in trends) / agreement
-
-            # Tightness bonus: tighter lines get a bump because the odds
-            # are better.  _line_tightness returns 0-1 (1 = tightest).
             tightness = _line_tightness(market)
 
-            # Composite: 35% hit rate, 25% agreement, 15% sample, 25% tightness
             score = (
                 avg_rate * 0.35
                 + min(agreement / 5, 1.0) * 0.25
@@ -447,6 +654,27 @@ def _estimate_implied_probability(market: str) -> float | None:
 
     table = under_implied if direction.lower() == "under" else over_implied
     return table.get(line)
+
+
+def _get_moneyline_implied(
+    market: str, ml: MoneylineOdds, match: UpcomingMatch
+) -> float | None:
+    """Get the implied probability for a moneyline market using real odds."""
+    market_lower = market.lower()
+    if "draw" in market_lower:
+        return ml.draw_implied
+    if "win" in market_lower:
+        for player, implied in [
+            (match.home, ml.home_implied),
+            (match.away, ml.away_implied),
+        ]:
+            if extract_handle(player).lower() in market_lower:
+                return implied
+            if player.lower() in market_lower:
+                return implied
+        # If we can't match the player, skip
+        return None
+    return None
 
 
 def _line_tightness(market: str) -> float:

@@ -75,7 +75,13 @@ class EsporfBot:
         )
 
     async def scan_once(self) -> list[MatchupReport]:
-        """Run a single scan cycle. Returns reports with qualifying trends."""
+        """Run a single scan cycle. Returns reports with qualifying trends.
+
+        Uses the full-schedule endpoint (day-based + upcoming + inplay) to
+        see matches up to several hours in advance. Fetches real odds for
+        each upcoming match so we can cross-reference trend data with the
+        actual lines being offered.
+        """
         self._scan_count += 1
         timestamp = datetime.now().strftime("%H:%M:%S")
         console.print(f"\n[dim]── Scan #{self._scan_count} at {timestamp} ──[/dim]")
@@ -90,46 +96,44 @@ class EsporfBot:
             except Exception as e:
                 logger.warning("Failed to fetch ended matches for league %d: %s", lid, e)
 
-        # Fetch upcoming AND inplay matches, then deduplicate.
-        # BetsAPI often lists eSoccer Volta matches as inplay immediately
-        # (even before kickoff), so we must check both endpoints to avoid
-        # missing matches that skip the "upcoming" window entirely.
-        seen_ids: set[str] = set()
-        all_upcoming = []
+        # Fetch the full schedule (day-based + upcoming + inplay)
+        all_upcoming: list = []
         for lid in settings.tracked_league_ids:
             try:
-                upcoming = await self.api.get_upcoming_matches(lid)
-                for m in upcoming:
-                    if m.match_id not in seen_ids:
-                        seen_ids.add(m.match_id)
-                        all_upcoming.append(m)
+                schedule = await self.api.get_full_schedule(lid)
+                all_upcoming.extend(schedule)
             except Exception as e:
-                logger.warning("Failed to fetch upcoming for league %d: %s", lid, e)
-            try:
-                inplay = await self.api.get_inplay_matches(lid)
-                for m in inplay:
-                    if m.match_id not in seen_ids:
-                        seen_ids.add(m.match_id)
-                        all_upcoming.append(m)
-            except Exception as e:
-                logger.warning("Failed to fetch inplay for league %d: %s", lid, e)
+                logger.warning("Schedule fetch failed for league %d: %s", lid, e)
 
-        # Only keep matches starting within 1 hour (pre-match only)
-        imminent = [m for m in all_upcoming if m.starts_within(3600)]
+        # Keep matches starting within 4 hours (expanded from 1hr since we
+        # can now see the schedule further out)
+        lookahead = settings.schedule_lookahead
+        imminent = [m for m in all_upcoming if m.starts_within(lookahead)]
 
         if not imminent:
             skipped = len(all_upcoming)
+            hours = lookahead // 3600
             msg = (
-                f"[yellow]No matches within the next hour."
-                f"{f' ({skipped} later matches skipped.)' if skipped else ''}"
+                f"[yellow]No matches within the next {hours}h."
+                f"{f' ({skipped} later/live matches skipped.)' if skipped else ''}"
                 f" Will retry next cycle.[/yellow]"
             )
             console.print(msg)
             return []
 
         all_upcoming = imminent
+        console.print(
+            f"  [dim]Found {len(all_upcoming)} match(es) in next "
+            f"{lookahead // 3600}h — fetching odds...[/dim]"
+        )
 
-        # Analyze each matchup for trends
+        # Fetch real odds for each match
+        await self.api.fetch_odds_batch(all_upcoming)
+        odds_count = sum(1 for m in all_upcoming if m.odds and m.odds.has_data)
+        if odds_count:
+            console.print(f"  [dim]Got odds for {odds_count}/{len(all_upcoming)} matches[/dim]")
+
+        # Analyze each matchup for trends (now with real odds attached)
         reports: list[MatchupReport] = []
         for match in all_upcoming:
             report = self.analyzer.analyze_matchup(match)
@@ -166,13 +170,16 @@ class EsporfBot:
         self._running = True
         interval = settings.poll_interval
 
+        lookahead_h = settings.schedule_lookahead // 3600
         console.print(
             f"[bold blue]Esporf Trend Bot Starting[/bold blue]\n"
             f"  Tracking leagues: {settings.league_ids}\n"
             f"  Poll interval: {interval}s\n"
+            f"  Schedule lookahead: {lookahead_h}h\n"
+            f"  Odds: [bold green]LIVE[/bold green] (BetsAPI v2)\n"
             f"  Min hit rate: {settings.min_hit_rate:.0%}\n"
             f"  Min sample size: {settings.min_sample_size}\n"
-            f"  Goal lines: {settings.goal_lines}\n"
+            f"  Goal lines: {settings.goal_lines} + book-offered\n"
             f"  Press Ctrl+C to stop\n"
         )
 

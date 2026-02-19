@@ -40,7 +40,6 @@ def display_matchup_report(report: MatchupReport) -> None:
     top_rate = max(t.hit_rate for t in pick.supporting_trends)
     total_hits = sum(t.hits for t in pick.supporting_trends)
     total_sample = sum(t.sample_size for t in pick.supporting_trends)
-    history = f"{total_hits}/{total_sample} ({top_rate:.0%})"
 
     time_tag = f"in {minutes} min"
     if top_rate >= 0.81:
@@ -52,10 +51,35 @@ def display_matchup_report(report: MatchupReport) -> None:
 
     units = pick.units_display
 
+    # Build body with actual odds when available
+    odds_str = ""
+    if pick.odds_line:
+        from esporf.models import _parse_line
+
+        parsed = _parse_line(pick.market)
+        if parsed:
+            direction = parsed[0]
+            if direction.lower() == "over":
+                odds_str = f"  [bold cyan]({pick.odds_line.over_american})[/]"
+            else:
+                odds_str = f"  [bold cyan]({pick.odds_line.under_american})[/]"
+
+    edge_str = ""
+    if pick.edge is not None and pick.edge > 0:
+        edge_str = f"  |  [bold green]{pick.edge:.0%} edge[/]"
+
     body = (
-        f"[bold white]{pick.market.upper()}  —  {units}[/]\n"
-        f"[bold]{top_rate:.0%}[/] hit rate  ({total_hits}/{total_sample})"
+        f"[bold white]{pick.market.upper()}  —  {units}[/]{odds_str}\n"
+        f"[bold]{top_rate:.0%}[/] hit rate  ({total_hits}/{total_sample}){edge_str}"
     )
+
+    # Show available lines if odds were fetched
+    if match.odds and match.odds.has_data:
+        lines_display = "  ".join(
+            f"{ol.line}" for ol in match.odds.total_lines
+        )
+        body += f"\n[dim]Lines: {lines_display}[/dim]"
+
     home = extract_handle(match.home)
     away = extract_handle(match.away)
 

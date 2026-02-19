@@ -66,13 +66,35 @@ def _build_discord_embed(report: MatchupReport) -> dict:
     home = extract_handle(match.home)
     away = extract_handle(match.away)
 
+    # Build odds string if real odds are attached
+    odds_str = ""
+    if pick.odds_line:
+        from esporf.models import _parse_line
+
+        parsed = _parse_line(pick.market)
+        if parsed:
+            direction = parsed[0]
+            if direction.lower() == "over":
+                odds_str = f"  ({pick.odds_line.over_american})"
+            else:
+                odds_str = f"  ({pick.odds_line.under_american})"
+
+    edge_str = ""
+    if pick.edge is not None and pick.edge > 0:
+        edge_str = f"  |  **{pick.edge:.0%} edge**"
+
     lines = [
         f"### {home}  vs  {away}",
         "",
-        f"## {pick.market.upper()}  —  {units}",
+        f"## {pick.market.upper()}  —  {units}{odds_str}",
         "",
-        f"**{top_rate:.0%}** hit rate  ({total_hits}/{total_sample})",
+        f"**{top_rate:.0%}** hit rate  ({total_hits}/{total_sample}){edge_str}",
     ]
+
+    # Show offered lines when available
+    if match.odds and match.odds.total_lines:
+        offered = ", ".join(str(ol.line) for ol in match.odds.total_lines)
+        lines.append(f"\nLines offered: {offered}")
 
     color = _confidence_color(top_rate)
 
@@ -139,11 +161,28 @@ async def send_telegram_alert(reports: list[MatchupReport]) -> None:
         home = extract_handle(match.home)
         away = extract_handle(match.away)
 
+        # Add odds if available
+        odds_str = ""
+        if pick.odds_line:
+            from esporf.models import _parse_line
+
+            parsed = _parse_line(pick.market)
+            if parsed:
+                direction = parsed[0]
+                if direction.lower() == "over":
+                    odds_str = f" ({pick.odds_line.over_american})"
+                else:
+                    odds_str = f" ({pick.odds_line.under_american})"
+
+        edge_str = ""
+        if pick.edge is not None and pick.edge > 0:
+            edge_str = f" | {pick.edge:.0%} edge"
+
         lines = [
             f"<b>{home} vs {away}</b>",
-            f"<b>{market} — {units}</b>",
+            f"<b>{market}{odds_str} — {units}</b>",
             time_detail,
-            f"History: {total_hits}/{total_sample} ({top_rate:.0%})",
+            f"History: {total_hits}/{total_sample} ({top_rate:.0%}){edge_str}",
         ]
 
         msg = "\n".join(lines)

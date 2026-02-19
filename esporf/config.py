@@ -19,8 +19,9 @@ class Settings(BaseSettings):
     # Display timezone (e.g. "US/Eastern", "UTC")
     timezone: str = "US/Eastern"
 
-    # Polling
-    poll_interval: int = 45  # seconds — aggressive to catch Volta's short listing window
+    # Polling & schedule
+    poll_interval: int = 90  # seconds — relaxed since we now see further ahead
+    schedule_lookahead: int = 14400  # seconds (4 hours) — how far ahead to look for matches
 
     # Trend detection thresholds
     min_hit_rate: float = 0.70  # 70% minimum hit rate to surface a trend
