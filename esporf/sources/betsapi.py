@@ -264,14 +264,12 @@ class BetsAPIClient:
         """
         odds = MatchOdds()
 
-        # Fetch O/U and 1X2 in one call (comma-separated market IDs)
+        # Fetch all available odds (no market filter — comma-separated
+        # odds_market doesn't work reliably, and we parse selectively anyway)
         try:
             data = await self._request_raw(
                 f"{_API_ROOT}/v2/event/odds",
-                params={
-                    "event_id": event_id,
-                    "odds_market": "1_3,1_1",
-                },
+                params={"event_id": event_id},
             )
         except Exception as e:
             logger.debug("Odds fetch failed for event %s: %s", event_id, e)
@@ -281,10 +279,12 @@ class BetsAPIClient:
         odds_data = results.get("odds", results)
 
         # Parse Over/Under lines (market 1_3)
+        seen_lines: set[float] = set()
         for entry in odds_data.get("1_3", []):
-            line = self._parse_ou_odds(entry)
-            if line:
-                odds.total_lines.append(line)
+            for line in self._parse_ou_odds(entry):
+                if line.line not in seen_lines:
+                    seen_lines.add(line.line)
+                    odds.total_lines.append(line)
 
         # Parse 1X2 moneyline (market 1_1)
         ml_entries = odds_data.get("1_1", [])
@@ -363,17 +363,32 @@ class BetsAPIClient:
         )
 
     @staticmethod
-    def _parse_ou_odds(entry: dict) -> OddsLine | None:
-        """Parse a single Over/Under odds entry from BetsAPI."""
+    def _parse_ou_odds(entry: dict) -> list[OddsLine]:
+        """Parse a single Over/Under odds entry from BetsAPI.
+
+        BetsAPI uses ``over_od``/``under_od`` for O/U markets (not home/away).
+        The handicap can be a compound Asian total like "3.5,4.0" — we split
+        those into individual lines so each can be matched to trend data.
+        """
+        results: list[OddsLine] = []
         try:
-            line = float(entry.get("handicap", 0))
-            over = float(entry.get("home_od", 0))
-            under = float(entry.get("away_od", 0))
-            if line > 0 and over > 0 and under > 0:
-                return OddsLine(line=line, over_odds=over, under_odds=under)
+            handicap_str = str(entry.get("handicap", "0"))
+            over = float(entry.get("over_od", entry.get("home_od", 0)))
+            under = float(entry.get("under_od", entry.get("away_od", 0)))
+            if over <= 0 or under <= 0:
+                return results
+
+            # Handle compound handicap ("3.5,4.0") and simple ("4.5")
+            for part in handicap_str.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                line = float(part)
+                if line > 0:
+                    results.append(OddsLine(line=line, over_odds=over, under_odds=under))
         except (ValueError, TypeError):
             pass
-        return None
+        return results
 
     @staticmethod
     def _parse_moneyline(entry: dict) -> MoneylineOdds | None:
