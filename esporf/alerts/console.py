@@ -43,15 +43,18 @@ def display_matchup_report(report: MatchupReport) -> None:
     history = f"{total_hits}/{total_sample} ({top_rate:.0%})"
 
     time_tag = f"in {minutes} min"
-    color = "green" if pick.confidence >= 0.75 else "yellow"
-
-    sources = ", ".join(sorted({t.trend_type.replace("player_", "").replace("h2h", "H2H").title() for t in pick.supporting_trends}))
+    if top_rate >= 0.81:
+        color = "green"
+    elif top_rate >= 0.70:
+        color = "yellow"
+    else:
+        color = "bright_red"  # orange approximation in terminal
 
     units = pick.units_display
 
     body = (
         f"[bold white]{pick.market.upper()}  —  {units}[/]\n"
-        f"History: [bold]{history}[/]  [dim]({sources})[/dim]"
+        f"[bold]{top_rate:.0%}[/] hit rate  ({total_hits}/{total_sample})"
     )
     title = (
         f"[bold]{match.home}[/] vs [bold]{match.away}[/]  "

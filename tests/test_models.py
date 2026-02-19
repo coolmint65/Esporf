@@ -89,6 +89,6 @@ class TestMatchupReport:
 
 class TestLeague:
     def test_display_names(self):
-        assert League.GT_LEAGUES_12MIN.display_name == "GT Leagues (12 min)"
-        assert League.GG_LEAGUE_8MIN.display_name == "GG League (8 min)"
-        assert League.VOLTA_6MIN.display_name == "Volta (6 min)"
+        assert League.GT_LEAGUES_12MIN.display_name == "GT Leagues"
+        assert League.GG_LEAGUE_8MIN.display_name == "GG League"
+        assert League.VOLTA_6MIN.display_name == "Volta"

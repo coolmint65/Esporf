@@ -17,12 +17,12 @@ logger = logging.getLogger(__name__)
 
 _EST = ZoneInfo("US/Eastern")
 
-# Confidence-to-color mapping (Discord embed hex colors)
+# Hit-rate-to-color mapping (Discord embed hex colors)
 _COLOR_TIERS = [
-    (0.90, 0x57F287),  # bright green — elite
-    (0.80, 0x2ECC71),  # green — strong
-    (0.70, 0xFEE75C),  # yellow — solid
-    (0.00, 0xED4245),  # red — marginal (shouldn't appear, but safety)
+    (0.81, 0x2ECC71),  # green — 81%+
+    (0.70, 0xFEE75C),  # yellow — 70-80%
+    (0.65, 0xE67E22),  # orange — 65-70%
+    (0.00, 0xED4245),  # red — below 65% (safety)
 ]
 
 
@@ -60,24 +60,18 @@ def _build_discord_embed(report: MatchupReport) -> dict:
     top_rate = max(t.hit_rate for t in pick.supporting_trends)
     total_hits = sum(t.hits for t in pick.supporting_trends)
     total_sample = sum(t.sample_size for t in pick.supporting_trends)
-    sources = sorted({
-        t.trend_type.replace("player_", "").replace("h2h", "H2H").title()
-        for t in pick.supporting_trends
-    })
 
     units = pick.units_display
 
-    # Discord markdown headers for bigger text
-    # ### = medium heading, works inside embed descriptions
     lines = [
         f"### {match.home}  vs  {match.away}",
         "",
         f"## {pick.market.upper()}  —  {units}",
         "",
-        f"**{top_rate:.0%}** hit rate  ({total_hits}/{total_sample})  |  {', '.join(sources)}",
+        f"**{top_rate:.0%}** hit rate  ({total_hits}/{total_sample})",
     ]
 
-    color = _confidence_color(pick.confidence)
+    color = _confidence_color(top_rate)
 
     embed = {
         "title": f"{league_name}  |  {time_tag}",

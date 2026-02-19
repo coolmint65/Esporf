@@ -39,9 +39,9 @@ class League(Enum):
     @property
     def display_name(self) -> str:
         names = {
-            23114: "GT Leagues (12 min)",
-            37298: "GG League (8 min)",
-            38439: "Volta (6 min)",
+            23114: "GT Leagues",
+            37298: "GG League",
+            38439: "Volta",
         }
         return names.get(self.value, f"League {self.value}")
 
@@ -361,73 +361,42 @@ def _trend_source_label(trend_type: str) -> str:
 
 # ── Line-selection helpers ──────────────────────────────────────
 
-_TOTAL_LINE_RE = re.compile(r"(Over|Under)\s+(\d+(?:\.\d+)?)\s+Goals$", re.IGNORECASE)
-_PLAYER_LINE_RE = re.compile(
-    r"(?:Player\s+)?(Over)\s+(\d+(?:\.\d+)?)\s+(?:Goals|Scored)$", re.IGNORECASE
-)
+_LINE_RE = re.compile(r"(Over|Under)\s+(\d+(?:\.\d+)?)\s+Goals$", re.IGNORECASE)
 
 
 def _parse_line(market: str) -> tuple[str, float] | None:
-    """Extract direction and line value from a total-goals market.
+    """Extract direction and line value from a market name.
 
-    Returns e.g. ("Under", 4.5) or None for non-total-goals markets.
+    Returns e.g. ("Under", 4.5) or None for non-line markets.
     """
-    m = _TOTAL_LINE_RE.match(market)
+    m = _LINE_RE.match(market)
     if not m:
         return None
     return m.group(1), float(m.group(2))
 
 
-def _parse_player_line(market: str) -> tuple[str, str, float] | None:
-    """Extract player prefix, direction, line from a player goals market.
-
-    Handles both 'Player Over 1.5 Scored' and 'Alpha Over 2.5 Goals'.
-    Returns e.g. ("Player", "Over", 1.5) or ("Alpha", "Over", 2.5) or None.
-    """
-    m = _PLAYER_LINE_RE.match(market)
-    if m:
-        return "Player", m.group(1), float(m.group(2))
-    # Try "{Name} Over X.5 Goals"
-    name_re = re.match(r"(.+?)\s+(Over)\s+(\d+(?:\.\d+)?)\s+Goals$", market, re.IGNORECASE)
-    if name_re:
-        return name_re.group(1), name_re.group(2), float(name_re.group(3))
-    return None
-
-
 def _collapse_to_tightest_lines(
     groups: dict[str, list[Trend]],
 ) -> dict[str, list[Trend]]:
-    """For Over/Under markets, keep only the tightest line per group.
+    """For Over/Under total-goals markets, keep only the tightest line.
 
     "Tightest" = lowest Under line or highest Over line that qualifies,
     because those correspond to the best available odds.
-
-    Handles both total-goals lines and per-player team-total-goals lines.
     """
-    # Separate line-markets from non-line markets
     under_lines: dict[float, tuple[str, list[Trend]]] = {}
     over_lines: dict[float, tuple[str, list[Trend]]] = {}
-    # Per-player lines: player_name → {line: (market, trends)}
-    player_over_lines: dict[str, dict[float, tuple[str, list[Trend]]]] = {}
     result: dict[str, list[Trend]] = {}
 
     for market, trends in groups.items():
         parsed = _parse_line(market)
-        if parsed is not None:
-            direction, line = parsed
-            if direction.lower() == "under":
-                under_lines[line] = (market, trends)
-            else:
-                over_lines[line] = (market, trends)
+        if parsed is None:
+            result[market] = trends
             continue
-
-        player_parsed = _parse_player_line(market)
-        if player_parsed is not None:
-            player, _direction, line = player_parsed
-            player_over_lines.setdefault(player, {})[line] = (market, trends)
-            continue
-
-        result[market] = trends
+        direction, line = parsed
+        if direction.lower() == "under":
+            under_lines[line] = (market, trends)
+        else:
+            over_lines[line] = (market, trends)
 
     # Keep only the tightest Under (lowest line value)
     if under_lines:
@@ -439,12 +408,6 @@ def _collapse_to_tightest_lines(
     if over_lines:
         tightest = max(over_lines)
         market, trends = over_lines[tightest]
-        result[market] = trends
-
-    # Keep only the tightest Over per player (highest line)
-    for _player, lines in player_over_lines.items():
-        tightest = max(lines)
-        market, trends = lines[tightest]
         result[market] = trends
 
     return result

@@ -3,10 +3,9 @@
 Given a player or a head-to-head matchup, checks all relevant trend categories
 and returns those that meet the minimum hit rate threshold.
 
-Trend categories (mapped to Hard Rock sportsbook markets):
+Trend categories (full-time game lines only):
 - Over/Under X.5 total goals → Total Goals
-- Over/Under X.5 player goals scored → Home/Away Player Total Goals
-- Player win / draw / loss rate → Game Result (Moneyline) / Double Chance
+- Player win / draw / loss rate → Game Result (Moneyline)
 """
 
 from __future__ import annotations
@@ -116,27 +115,6 @@ class TrendAnalyzer:
             desc_template=f"{player_a} vs {player_b} — Draw",
         ))
 
-        # Player A scores X+ goals in H2H
-        for line in [1.5, 2.5, 3.5]:
-            hits = sum(1 for m in matches if m.goals_for(player_a) > line)
-            trends.append(self._make_trend(
-                category=f"{player_a} Over {line} Goals",
-                hits=hits, total=len(matches),
-                trend_type="h2h", player_a=player_a, player_b=player_b,
-                league_id=league_id, recent=recent_scores,
-                desc_template=f"{player_a} scores Over {line} vs {player_b}",
-            ))
-
-        for line in [1.5, 2.5, 3.5]:
-            hits = sum(1 for m in matches if m.goals_for(player_b) > line)
-            trends.append(self._make_trend(
-                category=f"{player_b} Over {line} Goals",
-                hits=hits, total=len(matches),
-                trend_type="h2h", player_a=player_b, player_b=player_a,
-                league_id=league_id, recent=recent_scores,
-                desc_template=f"{player_b} scores Over {line} vs {player_a}",
-            ))
-
         return [t for t in trends if t is not None]
 
     # ── Player Overall Trends ────────────────────────────────────────
@@ -202,17 +180,6 @@ class TrendAnalyzer:
                 trend_type=trend_type, player_a=player,
                 league_id=league_id, recent=recent,
                 desc_template=f"{player} {suffix} — Under {line} total goals",
-            ))
-
-        # Player goals scored over/under (1.5+ only — 0.5 not on book)
-        for line in [1.5, 2.5, 3.5]:
-            hits = sum(1 for m in matches if m.goals_for(player) > line)
-            trends.append(self._make_trend(
-                category=f"Player Over {line} Scored",
-                hits=hits, total=len(matches),
-                trend_type=trend_type, player_a=player,
-                league_id=league_id, recent=recent,
-                desc_template=f"{player} {suffix} — Scores over {line} goals",
             ))
 
         # Win rate

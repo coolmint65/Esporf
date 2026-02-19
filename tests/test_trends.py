@@ -83,9 +83,15 @@ class TestH2HTrends:
         assert "Over 5.5 Goals" in categories
         assert "Over 6.5 Goals" in categories
 
-    def test_h2h_player_goals_trend(self, db):
-        """All 15 H2H matches 4-3 → Alpha scores 3+ every game → Over 2.5 hits."""
-        _seed_high_scoring_h2h(db)
+    def test_h2h_draw_trend(self, db):
+        """H2H where all matches are draws should surface a Draw trend."""
+        for i in range(15):
+            db.insert_match(MatchResult(
+                match_id=f"draw_{i}", league_id=23114,
+                home="Alpha", away="Bravo",
+                home_score=2, away_score=2,
+                start_time=1000 + i * 100,
+            ))
         analyzer = TrendAnalyzer(db)
         analyzer.min_sample = 10
         analyzer.min_hit_rate = 0.70
@@ -96,13 +102,9 @@ class TestH2HTrends:
         )
         report = analyzer.analyze_matchup(match)
 
-        # Alpha scores 4 or 3 in every match → Over 2.5 Goals should hit
-        alpha_goals = [
-            t for t in report.trends
-            if t.category == "Alpha Over 2.5 Goals" and t.trend_type == "h2h"
-        ]
-        assert len(alpha_goals) == 1
-        assert alpha_goals[0].hit_rate == 1.0
+        draws = [t for t in report.trends if t.category == "Draw" and t.trend_type == "h2h"]
+        assert len(draws) == 1
+        assert draws[0].hit_rate == 1.0
 
     def test_no_trends_with_insufficient_data(self, db):
         """Only 3 H2H matches should not produce any trends."""
