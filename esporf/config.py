@@ -21,7 +21,7 @@ class Settings(BaseSettings):
 
     # Polling & schedule
     poll_interval: int = 45  # seconds — fast enough to catch Volta's brief listing window
-    schedule_lookahead: int = 2700  # seconds (45 min) — how far ahead to show/alert matches
+    schedule_lookahead: int = 1800  # seconds (30 min) — how far ahead to show/alert matches
 
     # Trend detection thresholds
     min_hit_rate: float = 0.70  # 70% minimum hit rate to surface a trend
