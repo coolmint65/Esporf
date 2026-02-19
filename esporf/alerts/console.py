@@ -10,7 +10,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from esporf.models import MatchupReport
+from esporf.models import MatchupReport, extract_handle
 
 console = Console()
 
@@ -56,8 +56,11 @@ def display_matchup_report(report: MatchupReport) -> None:
         f"[bold white]{pick.market.upper()}  —  {units}[/]\n"
         f"[bold]{top_rate:.0%}[/] hit rate  ({total_hits}/{total_sample})"
     )
+    home = extract_handle(match.home)
+    away = extract_handle(match.away)
+
     title = (
-        f"[bold]{match.home}[/] vs [bold]{match.away}[/]  "
+        f"[bold]{home}[/] vs [bold]{away}[/]  "
         f"[dim]| {kickoff} ({time_tag})[/dim]"
     )
 

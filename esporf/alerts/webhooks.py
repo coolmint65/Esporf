@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from esporf.config import settings
-from esporf.models import MatchupReport
+from esporf.models import MatchupReport, extract_handle
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +63,11 @@ def _build_discord_embed(report: MatchupReport) -> dict:
 
     units = pick.units_display
 
+    home = extract_handle(match.home)
+    away = extract_handle(match.away)
+
     lines = [
-        f"### {match.home}  vs  {match.away}",
+        f"### {home}  vs  {away}",
         "",
         f"## {pick.market.upper()}  —  {units}",
         "",
@@ -133,8 +136,11 @@ async def send_telegram_alert(reports: list[MatchupReport]) -> None:
         total_hits = sum(t.hits for t in pick.supporting_trends)
         total_sample = sum(t.sample_size for t in pick.supporting_trends)
 
+        home = extract_handle(match.home)
+        away = extract_handle(match.away)
+
         lines = [
-            f"<b>{match.home} vs {match.away}</b>",
+            f"<b>{home} vs {away}</b>",
             f"<b>{market} — {units}</b>",
             time_detail,
             f"History: {total_hits}/{total_sample} ({top_rate:.0%})",

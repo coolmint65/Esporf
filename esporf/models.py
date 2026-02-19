@@ -138,13 +138,11 @@ class UpcomingMatch:
     def starts_within(self, seconds: int) -> bool:
         """Return True if the match starts within the next *seconds* seconds.
 
-        Live matches always qualify. Past matches (already started but not
-        marked live) are excluded.
+        Excludes live and already-started matches — by the time a Volta
+        game is in-play the lines have moved and it's too late to bet.
         """
-        if self.is_live:
-            return True
         delta = self.start_time - time.time()
-        return 0 <= delta <= seconds
+        return 0 < delta <= seconds
 
     @property
     def minutes_until(self) -> int:
