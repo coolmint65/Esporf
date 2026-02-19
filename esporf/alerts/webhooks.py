@@ -84,7 +84,7 @@ def _build_discord_embed(report: MatchupReport) -> dict:
 
     lines = [
         f"### {home_display}  vs  {away_display}",
-        f"Kickoff: <t:{ts}:t>  (<t:{ts}:R>)",
+        f"### Kickoff: <t:{ts}:t>  (<t:{ts}:R>)",
         "",
         f"## {pick.market.upper()}  —  {units}{odds_str}",
         "",
