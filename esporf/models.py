@@ -111,6 +111,10 @@ class UpcomingMatch:
         except ValueError:
             return None
 
+    def starts_within(self, seconds: int) -> bool:
+        """Return True if the match starts within the given number of seconds."""
+        return self.is_live or (self.start_time - time.time()) <= seconds
+
 
 @dataclass
 class Trend:
@@ -140,6 +144,30 @@ class Trend:
 
 
 @dataclass
+class BetPick:
+    """The single best bet recommendation derived from qualifying trends."""
+
+    market: str  # e.g. "Over 5.5 Goals", "BTTS - Yes"
+    confidence: float  # weighted score combining hit rate + sample size + agreement
+    supporting_trends: list[Trend]  # trends that back this pick
+    reason: str  # human-readable explanation
+
+    @property
+    def confidence_pct(self) -> str:
+        return f"{self.confidence:.0%}"
+
+    @property
+    def confidence_label(self) -> str:
+        if self.confidence >= 0.90:
+            return "Very High"
+        if self.confidence >= 0.80:
+            return "High"
+        if self.confidence >= 0.75:
+            return "Moderate"
+        return "Low"
+
+
+@dataclass
 class MatchupReport:
     """All qualifying trends for an upcoming matchup, sent as an alert."""
 
@@ -150,3 +178,61 @@ class MatchupReport:
     @property
     def has_trends(self) -> bool:
         return len(self.trends) > 0
+
+    @property
+    def best_bet(self) -> BetPick | None:
+        """Pick the single best bet from qualifying trends.
+
+        Scoring: groups trends by market category, then scores each market by
+        the number of agreeing trend sources, average hit rate, and total
+        sample size. The market with the highest composite score wins.
+        """
+        if not self.trends:
+            return None
+
+        # Group trends by category (e.g. "Over 5.5 Goals")
+        market_groups: dict[str, list[Trend]] = {}
+        for t in self.trends:
+            market_groups.setdefault(t.category, []).append(t)
+
+        best_market: str | None = None
+        best_score = 0.0
+        best_trends: list[Trend] = []
+
+        for market, trends in market_groups.items():
+            # Agreement: how many independent sources back this market
+            agreement = len(trends)
+            avg_rate = sum(t.hit_rate for t in trends) / agreement
+            avg_sample = sum(t.sample_size for t in trends) / agreement
+            # Composite: 50% hit rate, 30% agreement, 20% sample depth
+            score = (avg_rate * 0.50) + (min(agreement / 5, 1.0) * 0.30) + (min(avg_sample / 20, 1.0) * 0.20)
+            if score > best_score:
+                best_score = score
+                best_market = market
+                best_trends = trends
+
+        if best_market is None:
+            return None
+
+        sources = ", ".join(sorted({_trend_source_label(t.trend_type) for t in best_trends}))
+        top_rate = max(t.hit_rate for t in best_trends)
+        reason = (
+            f"{best_market} backed by {len(best_trends)} trend(s) "
+            f"({sources}) — top hit rate {top_rate:.0%}"
+        )
+
+        return BetPick(
+            market=best_market,
+            confidence=best_score,
+            supporting_trends=best_trends,
+            reason=reason,
+        )
+
+
+def _trend_source_label(trend_type: str) -> str:
+    return {
+        "h2h": "H2H",
+        "player_overall": "Overall",
+        "player_home": "Home form",
+        "player_away": "Away form",
+    }.get(trend_type, trend_type)

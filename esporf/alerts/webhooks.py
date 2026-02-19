@@ -3,59 +3,59 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 import httpx
 
 from esporf.config import settings
-from esporf.models import MatchupReport, Trend
+from esporf.models import MatchupReport
 
 logger = logging.getLogger(__name__)
 
 
 def format_matchup_message(report: MatchupReport) -> str:
-    """Format a matchup report into a readable alert message for Discord/Telegram."""
+    """Format a matchup report into a clean alert with a clear bet pick."""
     match = report.match
     league = match.league
     league_name = league.display_name if league else f"League {match.league_id}"
+    kickoff = datetime.fromtimestamp(match.start_time).strftime("%H:%M")
+    live_tag = " (LIVE)" if match.is_live else ""
 
     lines = [
-        f"**{match.display_name}** — {league_name}",
-        "",
+        f"**{match.display_name}**",
+        f"{league_name} | Kickoff {kickoff}{live_tag}",
     ]
 
-    for trend in report.trends:
-        emoji = _hit_rate_indicator(trend.hit_rate)
-        lines.append(
-            f"{emoji} **{trend.category}** — "
-            f"{trend.record} ({trend.hit_rate_pct}) "
-            f"[{_trend_type_short(trend.trend_type)}]"
-        )
-        if trend.recent_results:
-            lines.append(f"   Recent: {', '.join(trend.recent_results[:5])}")
+    # Lead with the recommended bet
+    pick = report.best_bet
+    if pick:
+        lines.append("")
+        lines.append(f">>> **BET: {pick.market}**")
+        lines.append(f"Confidence: {pick.confidence_label} ({pick.confidence_pct})")
+        lines.append(f"{pick.reason}")
 
-    lines.append("")
-    lines.append(f"_Trends above {settings.min_hit_rate:.0%} over last {settings.last_n_matches} matches_")
+    # Supporting trends (compact, capped at 5)
+    if report.trends:
+        lines.append("")
+        lines.append("__Supporting Trends__")
+        for trend in report.trends[:5]:
+            bar = _confidence_bar(trend.hit_rate)
+            lines.append(
+                f"{bar} {trend.category} — "
+                f"{trend.record} ({trend.hit_rate_pct})"
+            )
 
     return "\n".join(lines)
 
 
-def _hit_rate_indicator(rate: float) -> str:
+def _confidence_bar(rate: float) -> str:
     if rate >= 0.90:
-        return ">>>>"
-    elif rate >= 0.80:
-        return ">>>"
-    elif rate >= 0.75:
-        return ">>"
-    return ">"
-
-
-def _trend_type_short(trend_type: str) -> str:
-    return {
-        "h2h": "H2H",
-        "player_overall": "Overall",
-        "player_home": "Home",
-        "player_away": "Away",
-    }.get(trend_type, trend_type)
+        return "[####]"
+    if rate >= 0.80:
+        return "[### ]"
+    if rate >= 0.75:
+        return "[##  ]"
+    return "[#   ]"
 
 
 async def send_discord_alert(reports: list[MatchupReport]) -> None:

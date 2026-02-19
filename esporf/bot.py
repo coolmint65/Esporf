@@ -90,7 +90,7 @@ class EsporfBot:
             except Exception as e:
                 logger.warning("Failed to fetch ended matches for league %d: %s", lid, e)
 
-        # Fetch upcoming matches
+        # Fetch upcoming matches (only those starting within 1 hour)
         all_upcoming = []
         for lid in settings.tracked_league_ids:
             try:
@@ -101,9 +101,20 @@ class EsporfBot:
             except Exception as e:
                 logger.warning("Failed to fetch upcoming for league %d: %s", lid, e)
 
-        if not all_upcoming:
-            console.print("[yellow]No upcoming matches found. Will retry next cycle.[/yellow]")
+        # Only keep matches starting within 1 hour (or already live)
+        imminent = [m for m in all_upcoming if m.starts_within(3600)]
+
+        if not imminent:
+            skipped = len(all_upcoming)
+            msg = (
+                f"[yellow]No matches within the next hour."
+                f"{f' ({skipped} later matches skipped.)' if skipped else ''}"
+                f" Will retry next cycle.[/yellow]"
+            )
+            console.print(msg)
             return []
+
+        all_upcoming = imminent
 
         # Analyze each matchup for trends
         reports: list[MatchupReport] = []
