@@ -6,7 +6,6 @@ Primary data source for building match history. Fetches:
 - In-play matches (for live alerting)
 - Event odds (Over/Under lines, moneylines from sportsbooks)
 - Day-based schedule (for longer lookahead)
-- Predicted schedule (extrapolated from match cadence when API doesn't list ahead)
 
 Docs: https://betsapi.com/docs/
 """
@@ -17,7 +16,6 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timedelta, timezone
-from itertools import combinations
 from typing import Any
 
 import httpx
@@ -207,21 +205,15 @@ class BetsAPIClient:
 
         return all_matches
 
-    async def get_full_schedule(
-        self,
-        league_id: int,
-        ended: list[MatchResult] | None = None,
-    ) -> list[UpcomingMatch]:
-        """Get the broadest possible schedule by combining all sources.
+    async def get_full_schedule(self, league_id: int) -> list[UpcomingMatch]:
+        """Get the broadest possible schedule by combining all BetsAPI sources.
 
         Merges: day-based upcoming (today + tomorrow) + standard upcoming
-        + in-play + predicted (from match cadence). Deduplicates by match
-        ID. This maximizes the lookahead window.
+        + in-play. Deduplicates by match ID.
 
-        Args:
-            league_id: League to query.
-            ended: Recently ended matches. If provided, used to predict
-                upcoming matches when BetsAPI doesn't list them in advance.
+        Note: For Volta matches, the bot also uses ESportsBattle as a
+        supplementary schedule source (see bot.py), since BetsAPI only
+        lists Volta matches ~2 min before kickoff.
         """
         seen: set[str] = set()
         all_matches: list[UpcomingMatch] = []
@@ -258,215 +250,9 @@ class BetsAPIClient:
         except Exception as e:
             logger.warning("Inplay fetch failed for league %d: %s", league_id, e)
 
-        # 4. Predicted matches (from round-robin cadence)
-        if ended:
-            predicted = self.predict_upcoming(
-                ended, seen, league_id, live_matches=all_matches,
-            )
-            for m in predicted:
-                if m.match_id not in seen:
-                    seen.add(m.match_id)
-                    all_matches.append(m)
-
         # Sort by start time
         all_matches.sort(key=lambda m: m.start_time)
         return all_matches
-
-    # ── Schedule prediction ───────────────────────────────────────────
-
-    def predict_upcoming(
-        self,
-        ended: list[MatchResult],
-        existing_ids: set[str],
-        league_id: int,
-        live_matches: list[UpcomingMatch] | None = None,
-        *,
-        cadence: int = 540,  # 9 minutes in seconds
-        matches_per_slot: int = 2,
-        session_gap: int = 1800,  # 30 min = new session boundary
-        plays_per_pair: int = 2,  # double round-robin: each pair plays 2x
-    ) -> list[UpcomingMatch]:
-        """Predict upcoming matches from the ended-match cadence.
-
-        BetsAPI doesn't list Volta matches more than ~2 minutes before
-        kickoff, but the schedule follows a predictable double round-robin
-        pattern: 5 players, 2 concurrent matches every ~9 minutes,
-        cycling through all C(5,2)=10 unique matchups × 2 = 20 total
-        matches per session.
-
-        This method:
-        1. Identifies the current session's players from recent results
-           (including any inplay/upcoming that haven't ended yet)
-        2. Counts how many times each pair has played (expects 2 per pair)
-        3. Predicts remaining matches (rematches + first-time matchups)
-        4. Returns them as UpcomingMatch objects
-
-        Args:
-            ended: Recently ended matches (page 1 from BetsAPI)
-            existing_ids: Match IDs already known (to avoid duplicates)
-            league_id: The league to predict for
-            live_matches: Currently live/upcoming matches to include in
-                session detection (these may not be in ended yet)
-            cadence: Seconds between match slots (default 540 = 9 min)
-            matches_per_slot: Concurrent matches per slot (default 2)
-            session_gap: Seconds gap that indicates a new session
-            plays_per_pair: How many times each pair plays (default 2
-                for Volta's double round-robin)
-
-        Returns:
-            List of predicted UpcomingMatch entries for remaining matchups.
-        """
-        if not ended:
-            return []
-
-        now = int(time.time())
-
-        # Build a unified timeline: ended matches + live/upcoming matches
-        # (live matches may not appear in ended yet).
-        # Only include matches within the recent past / near future so
-        # far-future scheduled matches don't confuse session detection.
-        horizon = now + cadence * 2  # don't include matches far in the future
-        timeline: list[tuple[int, str, str]] = []  # (time, home, away)
-        for m in ended:
-            if m.league_id != league_id:
-                continue
-            timeline.append((m.start_time, m.home, m.away))
-
-        if live_matches:
-            for m in live_matches:
-                if m.league_id != league_id:
-                    continue
-                if m.start_time > horizon:
-                    continue  # skip far-future scheduled matches
-                # Avoid duplicating if already in ended
-                if not any(t == m.start_time and h == m.home and a == m.away
-                           for t, h, a in timeline):
-                    timeline.append((m.start_time, m.home, m.away))
-
-        # Sort newest first
-        timeline.sort(key=lambda x: x[0], reverse=True)
-
-        if len(timeline) < 2:
-            return []
-
-        # Find matches in the current session.
-        # Sessions are defined by a fixed set of ~5 players. We detect a
-        # session boundary when: (a) a time gap exceeds session_gap, OR
-        # (b) we encounter players from a different group. Start from the
-        # most recent matches and work backwards.
-        session: list[tuple[int, str, str]] = []
-        players: set[str] = set()
-        prev_time: int | None = None
-
-        for entry in timeline:
-            t, home, away = entry
-
-            # Time gap check
-            if prev_time is not None and (prev_time - t) > session_gap:
-                break
-
-            # Player consistency check: once we have ≥5 players, any new
-            # player means a different session/group has started
-            new_players = {home, away} - players
-            if len(players) >= 5 and new_players:
-                break
-
-            session.append(entry)
-            players.add(home)
-            players.add(away)
-            prev_time = t
-
-        if len(session) < 2:
-            return []
-
-        if len(players) < 2:
-            return []
-
-        # Count how many times each unordered pair has been played.
-        # Volta uses a double round-robin: each pair plays 2x (home/away swap).
-        pair_counts: dict[tuple[str, str], int] = {}
-        for _, home, away in session:
-            pair = tuple(sorted([home, away]))
-            pair_counts[pair] = pair_counts.get(pair, 0) + 1
-
-        # Build the list of remaining matches: each pair needs
-        # plays_per_pair total plays; generate the deficit.
-        # Separate into "first play" and "rematch" rounds so the same
-        # pair doesn't appear twice in the same time slot.
-        all_pairs = {tuple(sorted(pair)) for pair in combinations(players, 2)}
-        round1: list[tuple[str, str]] = []  # first remaining play
-        round2: list[tuple[str, str]] = []  # second remaining play (rematch)
-        for pair in sorted(all_pairs):
-            played_count = pair_counts.get(pair, 0)
-            deficit = max(0, plays_per_pair - played_count)
-            if deficit >= 1:
-                round1.append(pair)
-            if deficit >= 2:
-                round2.append(pair)
-        remaining_list = round1 + round2
-
-        if not remaining_list:
-            return []
-
-        # Find the latest start time among currently live matches (not just
-        # ended), so predictions start AFTER the current live slot finishes.
-        # Matches that started within the last ~7 minutes are "live".
-        latest_time = max(t for t, _, _ in session)
-        live_cutoff = now - (cadence - 60)  # matches started < ~8 min ago are live
-        has_live = any(t >= live_cutoff for t, _, _ in session)
-
-        # If the latest activity is more than cadence*3 ago, the session
-        # might be over. Don't predict stale sessions.
-        if now - latest_time > cadence * 3:
-            logger.debug(
-                "Session appears stale (last match %ds ago), skipping prediction",
-                now - latest_time,
-            )
-            return []
-
-        # Calculate the first predicted slot.
-        # If matches are currently live, the next slot is after they finish:
-        # latest_time + cadence. We also ensure it's at least 2 minutes
-        # in the future so we don't predict matches at "in 0 min".
-        next_slot = latest_time + cadence
-        min_future = now + 120  # at least 2 minutes from now
-        while next_slot < min_future:
-            next_slot += cadence
-
-        # Pair remaining matchups into time slots
-        predicted: list[UpcomingMatch] = []
-        for i in range(0, len(remaining_list), matches_per_slot):
-            slot_time = next_slot + (cadence * (i // matches_per_slot))
-
-            chunk = remaining_list[i : i + matches_per_slot]
-            for home, away in chunk:
-                match_id = f"predicted_{league_id}_{slot_time}_{home}_{away}"
-                if match_id in existing_ids:
-                    continue
-                predicted.append(
-                    UpcomingMatch(
-                        match_id=match_id,
-                        league_id=league_id,
-                        home=home,
-                        away=away,
-                        start_time=slot_time,
-                    )
-                )
-
-        if predicted:
-            total_expected = len(all_pairs) * plays_per_pair
-            total_played = sum(pair_counts.values())
-            logger.info(
-                "Predicted %d upcoming matches (%d remaining in session, "
-                "%d/%d played, %d players)",
-                len(predicted),
-                len(remaining_list),
-                total_played,
-                total_expected,
-                len(players),
-            )
-
-        return predicted
 
     # ── Odds ─────────────────────────────────────────────────────────
 
