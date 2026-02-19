@@ -237,17 +237,6 @@ class TrendAnalyzer:
                 desc_template=f"{player} {suffix} — Scores over {line} goals",
             ))
 
-        # Player goals conceded over/under
-        for line in [0.5, 1.5, 2.5, 3.5]:
-            hits = sum(1 for m in matches if m.goals_against(player) > line)
-            trends.append(self._make_trend(
-                category=f"Player Over {line} Conceded",
-                hits=hits, total=len(matches),
-                trend_type=trend_type, player_a=player,
-                league_id=league_id, recent=recent,
-                desc_template=f"{player} {suffix} — Concedes over {line} goals",
-            ))
-
         # BTTS
         btts_hits = sum(1 for m in matches if m.btts)
         trends.append(self._make_trend(
@@ -273,16 +262,6 @@ class TrendAnalyzer:
             trend_type=trend_type, player_a=player,
             league_id=league_id, recent=recent,
             desc_template=f"{player} {suffix} — Wins",
-        ))
-
-        # Clean sheet (concedes 0)
-        cs = sum(1 for m in matches if m.goals_against(player) == 0)
-        trends.append(self._make_trend(
-            category="Clean Sheet",
-            hits=cs, total=len(matches),
-            trend_type=trend_type, player_a=player,
-            league_id=league_id, recent=recent,
-            desc_template=f"{player} {suffix} — Clean sheet",
         ))
 
         return [t for t in trends if t is not None]

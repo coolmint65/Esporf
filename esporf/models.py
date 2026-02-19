@@ -203,6 +203,54 @@ class BetPick:
             return "Moderate"
         return "Low"
 
+    @property
+    def units(self) -> float:
+        """Recommended unit size based on confidence level.
+
+        Conservative by default — higher units reserved for the strongest edges.
+        """
+        n_sources = len(self.supporting_trends)
+        top_rate = max(t.hit_rate for t in self.supporting_trends)
+        min_rate = min(t.hit_rate for t in self.supporting_trends)
+        avg_sample = sum(t.sample_size for t in self.supporting_trends) / max(n_sources, 1)
+        has_h2h = any(t.trend_type == "h2h" for t in self.supporting_trends)
+
+        # Start at 1u, add bonuses for strong signals
+        u = 1.0
+
+        # Hit rate bonus
+        if top_rate >= 0.95:
+            u += 0.75
+        elif top_rate >= 0.90:
+            u += 0.50
+        elif top_rate >= 0.85:
+            u += 0.25
+
+        # Multi-source agreement bonus
+        if n_sources >= 4:
+            u += 0.50
+        elif n_sources >= 3:
+            u += 0.25
+
+        # Large sample bonus
+        if avg_sample >= 18:
+            u += 0.25
+
+        # Perfect storm: H2H backs it, 4+ sources, ALL above 85%
+        if has_h2h and n_sources >= 4 and min_rate >= 0.85:
+            u += 0.50
+
+        # Snap DOWN to the nearest allowed tier (conservative)
+        tiers = [1.0, 1.25, 1.5, 1.75, 2.0, 3.0]
+        return max(t for t in tiers if t <= u)
+
+    @property
+    def units_display(self) -> str:
+        u = self.units
+        if u == int(u):
+            return f"{int(u)}u"
+        return f"{u}u"
+
 
 @dataclass
 class MatchupReport:

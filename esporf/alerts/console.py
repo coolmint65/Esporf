@@ -47,8 +47,10 @@ def display_matchup_report(report: MatchupReport) -> None:
 
     sources = ", ".join(sorted({t.trend_type.replace("player_", "").replace("h2h", "H2H").title() for t in pick.supporting_trends}))
 
+    units = pick.units_display
+
     body = (
-        f"[bold white]{pick.market.upper()}[/]\n"
+        f"[bold white]{pick.market.upper()}  —  {units}[/]\n"
         f"History: [bold]{history}[/]  [dim]({sources})[/dim]"
     )
     title = (

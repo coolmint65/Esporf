@@ -9,13 +9,28 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from esporf.config import settings
-from esporf.models import MatchupReport
+from esporf.models import MatchupReport, extract_handle
 
 logger = logging.getLogger(__name__)
 
 # ── Formatting helpers ───────────────────────────────────────────
 
 _EST = ZoneInfo("US/Eastern")
+
+# Confidence-to-color mapping (Discord embed hex colors)
+_COLOR_TIERS = [
+    (0.90, 0x57F287),  # bright green — elite
+    (0.80, 0x2ECC71),  # green — strong
+    (0.70, 0xFEE75C),  # yellow — solid
+    (0.00, 0xED4245),  # red — marginal (shouldn't appear, but safety)
+]
+
+
+def _confidence_color(confidence: float) -> int:
+    for threshold, color in _COLOR_TIERS:
+        if confidence >= threshold:
+            return color
+    return 0x95A5A6
 
 
 def _kickoff_est(ts: int) -> str:
@@ -25,61 +40,62 @@ def _kickoff_est(ts: int) -> str:
 
 
 def _build_discord_embed(report: MatchupReport) -> dict:
-    """Build a Discord embed matching the clean card style."""
+    """Build a clean Discord embed card for a bet pick."""
     match = report.match
     pick = report.best_bet
+    if not pick:
+        return {}
+
     league = match.league
     league_name = league.display_name if league else f"League {match.league_id}"
-
-    market_label = pick.market.upper() if pick else "NO PICK"
     minutes = match.minutes_until
     time_str = _kickoff_est(match.start_time)
-    time_detail = f"{time_str} ({minutes} Minutes)" if minutes > 0 else f"{time_str} (LIVE)"
 
-    # Aggregate history across supporting trends for the top-line stat
-    if pick and pick.supporting_trends:
-        total_hits = sum(t.hits for t in pick.supporting_trends)
-        total_sample = sum(t.sample_size for t in pick.supporting_trends)
-        top_rate = max(t.hit_rate for t in pick.supporting_trends)
-        history_line = f"History: {total_hits}/{total_sample} ({top_rate:.1%})"
+    if minutes > 0:
+        time_tag = f"{time_str}  ({minutes} min)"
     else:
-        history_line = ""
+        time_tag = f"{time_str}  (LIVE)"
 
-    # Color: green if high confidence, yellow/orange otherwise
-    color = 0x2ECC71 if pick and pick.confidence >= 0.75 else 0xF1C40F
+    # Extract clean player handles for display
+    home_handle = extract_handle(match.home)
+    away_handle = extract_handle(match.away)
 
-    description_parts = [
-        f"**{league_name}**",
+    # History stats
+    top_rate = max(t.hit_rate for t in pick.supporting_trends)
+    total_hits = sum(t.hits for t in pick.supporting_trends)
+    total_sample = sum(t.sample_size for t in pick.supporting_trends)
+    sources = sorted({
+        t.trend_type.replace("player_", "").replace("h2h", "H2H").title()
+        for t in pick.supporting_trends
+    })
+
+    # Recent scores from the first supporting trend
+    recent = pick.supporting_trends[0].recent_results[:5] if pick.supporting_trends else []
+    recent_str = "  ".join(f"`{s}`" for s in recent) if recent else ""
+
+    # Unit display
+    units = pick.units_display
+
+    # Build description
+    lines = [
+        f"**{match.home}**  vs  **{match.away}**",
         "",
-        f"**{match.home}**",
-        "vs",
-        f"**{match.away}**",
+        f"> **{pick.market.upper()}  —  {units}**",
         "",
-        f"**{market_label}**",
+        f"**{top_rate:.0%}** hit rate  ({total_hits}/{total_sample})  |  {', '.join(sources)}",
     ]
-    if history_line:
-        description_parts.append(f"_{history_line}_")
+    if recent_str:
+        lines.append(f"Recent: {recent_str}")
+
+    color = _confidence_color(pick.confidence)
 
     embed = {
-        "title": f"{match.home} vs {match.away} | {market_label}",
-        "description": "\n".join(description_parts),
+        "title": f"{league_name}  |  {time_tag}",
+        "description": "\n".join(lines),
         "color": color,
-        "footer": {"text": "Powered by Esporf"},
-        "timestamp": datetime.fromtimestamp(match.start_time, tz=timezone.utc).isoformat(),
     }
 
     return embed
-
-
-def _build_discord_content(report: MatchupReport) -> str:
-    """One-line header above the embed."""
-    match = report.match
-    pick = report.best_bet
-    market = pick.market.upper() if pick else "—"
-    minutes = match.minutes_until
-    time_str = _kickoff_est(match.start_time)
-    time_detail = f"{time_str} ({minutes} Minutes)" if minutes > 0 else f"{time_str} (LIVE)"
-    return f"**{match.home} vs {match.away} | {market}**\n{time_detail}"
 
 
 # ── Senders ──────────────────────────────────────────────────────
@@ -94,9 +110,10 @@ async def send_discord_alert(reports: list[MatchupReport]) -> None:
     for report in reports:
         if not report.has_trends:
             continue
-        content = _build_discord_content(report)
         embed = _build_discord_embed(report)
-        payload = {"content": content, "embeds": [embed]}
+        if not embed:
+            continue
+        payload = {"embeds": [embed]}
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(url, json=payload)
@@ -120,20 +137,24 @@ async def send_telegram_alert(reports: list[MatchupReport]) -> None:
             continue
         match = report.match
         pick = report.best_bet
-        market = pick.market.upper() if pick else "—"
+        if not pick:
+            continue
+        market = pick.market.upper()
+        units = pick.units_display
         minutes = match.minutes_until
         time_str = _kickoff_est(match.start_time)
         time_detail = f"{time_str} ({minutes} min)" if minutes > 0 else f"{time_str} (LIVE)"
 
+        top_rate = max(t.hit_rate for t in pick.supporting_trends)
+        total_hits = sum(t.hits for t in pick.supporting_trends)
+        total_sample = sum(t.sample_size for t in pick.supporting_trends)
+
         lines = [
-            f"<b>{match.home} vs {match.away} | {market}</b>",
+            f"<b>{match.home} vs {match.away}</b>",
+            f"<b>{market} — {units}</b>",
             time_detail,
+            f"History: {total_hits}/{total_sample} ({top_rate:.0%})",
         ]
-        if pick and pick.supporting_trends:
-            top_rate = max(t.hit_rate for t in pick.supporting_trends)
-            total_hits = sum(t.hits for t in pick.supporting_trends)
-            total_sample = sum(t.sample_size for t in pick.supporting_trends)
-            lines.append(f"History: {total_hits}/{total_sample} ({top_rate:.1%})")
 
         msg = "\n".join(lines)
         try:

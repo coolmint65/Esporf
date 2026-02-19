@@ -141,8 +141,8 @@ class TestPlayerTrends:
         assert len(win_trends) >= 1
         assert win_trends[0].hit_rate == 12 / 15
 
-    def test_finds_clean_sheet_trend(self, db):
-        """Player with 12/15 clean sheets should trigger."""
+    def test_finds_under_goals_trend(self, db):
+        """Low-scoring player (2-0 in 12/15) triggers Under total goals trends."""
         _seed_low_scoring_player(db)
         analyzer = TrendAnalyzer(db)
         analyzer.min_sample = 10
@@ -154,12 +154,13 @@ class TestPlayerTrends:
         )
         report = analyzer.analyze_matchup(match)
 
-        cs = [
+        # All 15 matches have total goals <= 3, so Under 3.5 should be 100%
+        under35 = [
             t for t in report.trends
-            if t.category == "Clean Sheet" and t.player_a == "Keeper"
+            if t.category == "Under 3.5 Goals" and t.player_a == "Keeper"
         ]
-        assert len(cs) >= 1
-        assert cs[0].hit_rate == 12 / 15
+        assert len(under35) >= 1
+        assert under35[0].hit_rate == 1.0
 
 
 class TestTrendFiltering:
