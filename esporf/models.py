@@ -389,7 +389,10 @@ class MatchupReport:
             market_groups.setdefault(t.category, []).append(t)
 
         if has_real_odds:
-            return self._best_bet_with_odds(market_groups, odds)
+            pick = self._best_bet_with_odds(market_groups, odds)
+            if pick is not None:
+                return pick
+            # Fall back to estimated scoring if no book lines had positive edge
         return self._best_bet_estimated(market_groups)
 
     def _best_bet_with_odds(
