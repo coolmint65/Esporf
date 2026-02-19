@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from esporf.config import settings
-from esporf.models import MatchupReport, extract_handle
+from esporf.models import MatchupReport
 
 logger = logging.getLogger(__name__)
 
@@ -56,10 +56,6 @@ def _build_discord_embed(report: MatchupReport) -> dict:
     else:
         time_tag = f"{time_str}  (LIVE)"
 
-    # Extract clean player handles for display
-    home_handle = extract_handle(match.home)
-    away_handle = extract_handle(match.away)
-
     # History stats
     top_rate = max(t.hit_rate for t in pick.supporting_trends)
     total_hits = sum(t.hits for t in pick.supporting_trends)
@@ -69,23 +65,17 @@ def _build_discord_embed(report: MatchupReport) -> dict:
         for t in pick.supporting_trends
     })
 
-    # Recent scores from the first supporting trend
-    recent = pick.supporting_trends[0].recent_results[:5] if pick.supporting_trends else []
-    recent_str = "  ".join(f"`{s}`" for s in recent) if recent else ""
-
-    # Unit display
     units = pick.units_display
 
-    # Build description
+    # Discord markdown headers for bigger text
+    # ### = medium heading, works inside embed descriptions
     lines = [
-        f"**{match.home}**  vs  **{match.away}**",
+        f"### {match.home}  vs  {match.away}",
         "",
-        f"> **{pick.market.upper()}  —  {units}**",
+        f"## {pick.market.upper()}  —  {units}",
         "",
         f"**{top_rate:.0%}** hit rate  ({total_hits}/{total_sample})  |  {', '.join(sources)}",
     ]
-    if recent_str:
-        lines.append(f"Recent: {recent_str}")
 
     color = _confidence_color(pick.confidence)
 

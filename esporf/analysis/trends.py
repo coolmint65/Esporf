@@ -3,15 +3,10 @@
 Given a player or a head-to-head matchup, checks all relevant trend categories
 and returns those that meet the minimum hit rate threshold.
 
-Trend categories checked:
-- Over/Under X.5 total goals (2.5, 3.5, 4.5, 5.5, 6.5, 7.5)
-- Over/Under X.5 player goals scored
-- Over/Under X.5 player goals conceded
-- Both Teams to Score (BTTS) Yes/No
-- Player win / draw / loss rate
-- Clean sheet rate
-- Player scores 2+ goals
-- Player concedes 0 goals
+Trend categories (mapped to Hard Rock sportsbook markets):
+- Over/Under X.5 total goals → Total Goals
+- Over/Under X.5 player goals scored → Home/Away Player Total Goals
+- Player win / draw / loss rate → Game Result (Moneyline) / Double Chance
 """
 
 from __future__ import annotations
@@ -91,23 +86,6 @@ class TrendAnalyzer:
                 league_id=league_id, recent=recent_scores,
                 desc_template=f"{player_a} vs {player_b} — Under {line} total goals",
             ))
-
-        # BTTS
-        btts_hits = sum(1 for m in matches if m.btts)
-        trends.append(self._make_trend(
-            category="BTTS - Yes",
-            hits=btts_hits, total=len(matches),
-            trend_type="h2h", player_a=player_a, player_b=player_b,
-            league_id=league_id, recent=recent_scores,
-            desc_template=f"{player_a} vs {player_b} — Both Teams to Score",
-        ))
-        trends.append(self._make_trend(
-            category="BTTS - No",
-            hits=len(matches) - btts_hits, total=len(matches),
-            trend_type="h2h", player_a=player_a, player_b=player_b,
-            league_id=league_id, recent=recent_scores,
-            desc_template=f"{player_a} vs {player_b} — NOT Both Teams to Score",
-        ))
 
         # H2H win rate for player A
         a_wins = sum(1 for m in matches if m.won_by(player_a))
@@ -236,23 +214,6 @@ class TrendAnalyzer:
                 league_id=league_id, recent=recent,
                 desc_template=f"{player} {suffix} — Scores over {line} goals",
             ))
-
-        # BTTS
-        btts_hits = sum(1 for m in matches if m.btts)
-        trends.append(self._make_trend(
-            category="BTTS - Yes",
-            hits=btts_hits, total=len(matches),
-            trend_type=trend_type, player_a=player,
-            league_id=league_id, recent=recent,
-            desc_template=f"{player} {suffix} — BTTS Yes",
-        ))
-        trends.append(self._make_trend(
-            category="BTTS - No",
-            hits=len(matches) - btts_hits, total=len(matches),
-            trend_type=trend_type, player_a=player,
-            league_id=league_id, recent=recent,
-            desc_template=f"{player} {suffix} — BTTS No",
-        ))
 
         # Win rate
         wins = sum(1 for m in matches if m.won_by(player))
