@@ -48,13 +48,7 @@ def _build_discord_embed(report: MatchupReport) -> dict:
 
     league = match.league
     league_name = league.display_name if league else f"League {match.league_id}"
-    minutes = match.minutes_until
-    time_str = _kickoff_est(match.start_time)
-
-    if minutes > 0:
-        time_tag = f"{time_str}  (in {minutes} min)"
-    else:
-        time_tag = f"{time_str}  (LIVE)"
+    ts = match.start_time
 
     # History stats
     top_rate = max(t.hit_rate for t in pick.supporting_trends)
@@ -90,6 +84,7 @@ def _build_discord_embed(report: MatchupReport) -> dict:
 
     lines = [
         f"### {home_display}  vs  {away_display}",
+        f"Kickoff: <t:{ts}:t>  (<t:{ts}:R>)",
         "",
         f"## {pick.market.upper()}  —  {units}{odds_str}",
         "",
@@ -104,7 +99,7 @@ def _build_discord_embed(report: MatchupReport) -> dict:
     color = _confidence_color(top_rate)
 
     embed = {
-        "title": f"{league_name}  |  {time_tag}",
+        "title": league_name,
         "description": "\n".join(lines),
         "color": color,
     }
