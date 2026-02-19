@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from datetime import datetime, timezone
 
 import httpx
@@ -33,11 +34,20 @@ _VOLTA_LEAGUE_ID = 38439
 _MATCH_RE = re.compile(r"(.+?)\s*\((.+?)\)\s*v\s*(.+?)\s*\((.+?)\)")
 
 
+# Refresh the schedule at most every 12 hours
+_CACHE_TTL = 12 * 3600
+
+
 class AceOddsClient:
-    """Scrapes the AceOdds Volta schedule page."""
+    """Scrapes the AceOdds Volta schedule page.
+
+    Results are cached so we only hit the site once or twice a day.
+    """
 
     def __init__(self) -> None:
         self._client: httpx.AsyncClient | None = None
+        self._cache: list[UpcomingMatch] = []
+        self._cache_time: float = 0
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -55,18 +65,24 @@ class AceOddsClient:
             await self._client.aclose()
 
     async def get_volta_schedule(self) -> list[UpcomingMatch]:
-        """Fetch and parse the full-day Volta schedule from AceOdds.
+        """Return the full-day Volta schedule, using cache when fresh.
 
-        Returns UpcomingMatch objects for all listed matches. Times on
-        the page are UTC and get converted to unix timestamps for today
-        (or tomorrow if the time has already passed today).
+        Only fetches from AceOdds if the cache is older than 12 hours.
+        Returns UpcomingMatch objects with UTC-based unix timestamps.
         """
+        now = time.time()
+        if self._cache and (now - self._cache_time) < _CACHE_TTL:
+            logger.debug("AceOdds: using cached schedule (%d matches)", len(self._cache))
+            return self._cache
+
         client = await self._get_client()
         resp = await client.get(_SCHEDULE_URL)
         resp.raise_for_status()
         html = resp.text
 
-        return self._parse_schedule(html)
+        self._cache = self._parse_schedule(html)
+        self._cache_time = now
+        return self._cache
 
     def _parse_schedule(self, html: str) -> list[UpcomingMatch]:
         """Parse match entries from the AceOdds HTML table."""

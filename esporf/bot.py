@@ -154,9 +154,9 @@ class EsporfBot:
 
         if not imminent:
             skipped = len(all_upcoming)
-            hours = lookahead // 3600
+            window = f"{lookahead // 60} min" if lookahead < 3600 else f"{lookahead // 3600}h"
             msg = (
-                f"[yellow]No matches within the next {hours}h."
+                f"[yellow]No matches within the next {window}."
                 f"{f' ({skipped} later/live matches skipped.)' if skipped else ''}"
                 f" Will retry next cycle.[/yellow]"
             )
@@ -164,9 +164,10 @@ class EsporfBot:
             return []
 
         all_upcoming = imminent
+        window = f"{lookahead // 60} min" if lookahead < 3600 else f"{lookahead // 3600}h"
         console.print(
             f"  [dim]Found {len(all_upcoming)} match(es) in next "
-            f"{lookahead // 3600}h — fetching odds...[/dim]"
+            f"{window} — fetching odds...[/dim]"
         )
 
         # Fetch real odds for BetsAPI-sourced matches only
@@ -201,14 +202,10 @@ class EsporfBot:
         for report in reports:
             display_matchup_report(report)
 
-        # Send webhook alerts only for near-term matches (within 60 min)
-        # to avoid flooding Discord/Telegram with the full day's schedule.
-        # Console output above still shows everything for planning.
-        alert_horizon = int(time.time()) + 3600  # 60 min ahead
+        # Send webhook alerts for new matchups only (avoid spamming same matchup)
         new_reports = [
             r for r in reports_with_trends
             if r.match.match_id not in self._alerted_match_ids
-            and r.match.start_time <= alert_horizon
         ]
         if new_reports:
             await send_alerts(new_reports)

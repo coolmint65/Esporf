@@ -42,7 +42,7 @@ def display_matchup_report(report: MatchupReport) -> None:
     total_sample = sum(t.sample_size for t in pick.supporting_trends)
 
     time_tag = f"in {minutes} min"
-    if top_rate >= 0.81:
+    if top_rate >= 0.80:
         color = "green"
     elif top_rate >= 0.70:
         color = "yellow"

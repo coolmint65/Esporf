@@ -19,8 +19,8 @@ _EST = ZoneInfo("US/Eastern")
 
 # Hit-rate-to-color mapping (Discord embed hex colors)
 _COLOR_TIERS = [
-    (0.81, 0x2ECC71),  # green — 81%+
-    (0.70, 0xFEE75C),  # yellow — 70-80%
+    (0.80, 0x2ECC71),  # green — 80%+
+    (0.70, 0xFEE75C),  # yellow — 70-79%
     (0.65, 0xE67E22),  # orange — 65-70%
     (0.00, 0xED4245),  # red — below 65% (safety)
 ]
