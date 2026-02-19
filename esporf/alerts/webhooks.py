@@ -63,8 +63,13 @@ def _build_discord_embed(report: MatchupReport) -> dict:
 
     units = pick.units_display
 
-    home = extract_handle(match.home)
-    away = extract_handle(match.away)
+    home_handle = extract_handle(match.home)
+    away_handle = extract_handle(match.away)
+
+    # Show full team names so user can match to sportsbook,
+    # with handles in bold for quick identification
+    home_display = match.home if home_handle != match.home else home_handle
+    away_display = match.away if away_handle != match.away else away_handle
 
     # Build odds string if real odds are attached
     odds_str = ""
@@ -84,7 +89,7 @@ def _build_discord_embed(report: MatchupReport) -> dict:
         edge_str = f"  |  **{pick.edge:.0%} edge**"
 
     lines = [
-        f"### {home}  vs  {away}",
+        f"### {home_display}  vs  {away_display}",
         "",
         f"## {pick.market.upper()}  —  {units}{odds_str}",
         "",
@@ -158,8 +163,10 @@ async def send_telegram_alert(reports: list[MatchupReport]) -> None:
         total_hits = sum(t.hits for t in pick.supporting_trends)
         total_sample = sum(t.sample_size for t in pick.supporting_trends)
 
-        home = extract_handle(match.home)
-        away = extract_handle(match.away)
+        home_handle = extract_handle(match.home)
+        away_handle = extract_handle(match.away)
+        home_display = match.home if home_handle != match.home else home_handle
+        away_display = match.away if away_handle != match.away else away_handle
 
         # Add odds if available
         odds_str = ""
@@ -179,7 +186,7 @@ async def send_telegram_alert(reports: list[MatchupReport]) -> None:
             edge_str = f" | {pick.edge:.0%} edge"
 
         lines = [
-            f"<b>{home} vs {away}</b>",
+            f"<b>{home_display} vs {away_display}</b>",
             f"<b>{market}{odds_str} — {units}</b>",
             time_detail,
             f"History: {total_hits}/{total_sample} ({top_rate:.0%}){edge_str}",
