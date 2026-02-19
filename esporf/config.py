@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     timezone: str = "US/Eastern"
 
     # Polling & schedule
-    poll_interval: int = 90  # seconds — relaxed since we now see further ahead
+    poll_interval: int = 45  # seconds — fast enough to catch Volta's brief listing window
     schedule_lookahead: int = 14400  # seconds (4 hours) — how far ahead to look for matches
 
     # Trend detection thresholds

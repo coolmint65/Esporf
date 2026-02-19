@@ -86,21 +86,25 @@ class EsporfBot:
         timestamp = datetime.now().strftime("%H:%M:%S")
         console.print(f"\n[dim]── Scan #{self._scan_count} at {timestamp} ──[/dim]")
 
-        # Update DB with latest ended matches
+        # Update DB with latest ended matches (also used for prediction)
+        ended_by_league: dict[int, list] = {}
         for lid in settings.tracked_league_ids:
             try:
                 ended = await self.api.get_ended_matches(lid, page=1)
+                ended_by_league[lid] = ended
                 added = self.db.insert_many(ended)
                 if added:
                     logger.info("Added %d new results for league %d", added, lid)
             except Exception as e:
                 logger.warning("Failed to fetch ended matches for league %d: %s", lid, e)
 
-        # Fetch the full schedule (day-based + upcoming + inplay)
+        # Fetch the full schedule (day-based + upcoming + inplay + predicted)
         all_upcoming: list = []
         for lid in settings.tracked_league_ids:
             try:
-                schedule = await self.api.get_full_schedule(lid)
+                schedule = await self.api.get_full_schedule(
+                    lid, ended=ended_by_league.get(lid)
+                )
                 all_upcoming.extend(schedule)
             except Exception as e:
                 logger.warning("Schedule fetch failed for league %d: %s", lid, e)

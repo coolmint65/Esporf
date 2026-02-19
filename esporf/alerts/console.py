@@ -41,6 +41,8 @@ def display_matchup_report(report: MatchupReport) -> None:
     total_hits = sum(t.hits for t in pick.supporting_trends)
     total_sample = sum(t.sample_size for t in pick.supporting_trends)
 
+    is_predicted = match.match_id.startswith("predicted_")
+    predicted_tag = " [dim italic](predicted)[/]" if is_predicted else ""
     time_tag = f"in {minutes} min"
     if top_rate >= 0.81:
         color = "green"
@@ -88,7 +90,7 @@ def display_matchup_report(report: MatchupReport) -> None:
 
     title = (
         f"[bold]{home_display}[/] vs [bold]{away_display}[/]  "
-        f"[dim]| {kickoff} ({time_tag})[/dim]"
+        f"[dim]| {kickoff} ({time_tag})[/dim]{predicted_tag}"
     )
 
     console.print(Panel(body, title=title, border_style=color, padding=(0, 2)))

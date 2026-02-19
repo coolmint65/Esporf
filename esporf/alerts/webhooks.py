@@ -51,8 +51,11 @@ def _build_discord_embed(report: MatchupReport) -> dict:
     minutes = match.minutes_until
     time_str = _kickoff_est(match.start_time)
 
+    is_predicted = match.match_id.startswith("predicted_")
+    predicted_tag = "  ~est." if is_predicted else ""
+
     if minutes > 0:
-        time_tag = f"{time_str}  (in {minutes} min)"
+        time_tag = f"{time_str}  (in {minutes} min{predicted_tag})"
     else:
         time_tag = f"{time_str}  (LIVE)"
 
