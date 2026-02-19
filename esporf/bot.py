@@ -3,7 +3,7 @@
 Workflow:
 1. On first run, backfill match history from BetsAPI into SQLite
 2. Every cycle: fetch newly ended matches and add to DB
-3. Fetch upcoming matches from ESportsBattle (primary) + BetsAPI (supplementary)
+3. Fetch upcoming matches from AceOdds (full day) + ESportsBattle (~30 min) + BetsAPI
 4. Run trend analysis on each matchup
 5. Display results and send webhook alerts for qualifying trends
 """
@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import time
 from datetime import datetime
 
 from rich.console import Console
@@ -23,6 +24,7 @@ from esporf.analysis.trends import TrendAnalyzer
 from esporf.config import settings
 from esporf.database import MatchDatabase
 from esporf.models import MatchupReport, UpcomingMatch, extract_handle
+from esporf.sources.aceodds import AceOddsClient
 from esporf.sources.betsapi import BetsAPIClient
 from esporf.sources.esportsbattle import ESportsBattleClient
 
@@ -44,6 +46,7 @@ class EsporfBot:
     def __init__(self):
         self.api = BetsAPIClient()
         self.esb = ESportsBattleClient()
+        self.ace = AceOddsClient()
         self.db = MatchDatabase()
         self.analyzer = TrendAnalyzer(self.db)
         self._running = False
@@ -87,10 +90,12 @@ class EsporfBot:
     async def scan_once(self) -> list[MatchupReport]:
         """Run a single scan cycle. Returns reports with qualifying trends.
 
-        Uses ESportsBattle as the primary schedule source (~30 min lookahead)
-        supplemented by BetsAPI for far-future matches. Fetches real odds
-        for each upcoming match so we can cross-reference trend data with
-        the actual lines being offered.
+        Uses three schedule sources in priority order:
+        1. AceOdds — full day schedule (7+ hours ahead)
+        2. ESportsBattle — ~30 min lookahead (exact matchups, confirms timing)
+        3. BetsAPI — real-time + other leagues
+
+        Fetches real odds for BetsAPI-sourced matches.
         """
         self._scan_count += 1
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -106,10 +111,21 @@ class EsporfBot:
             except Exception as e:
                 logger.warning("Failed to fetch ended matches for league %d: %s", lid, e)
 
-        # 1. Primary schedule: ESportsBattle (~30 min lookahead, exact matchups)
+        # 1. Long-range: AceOdds (full day schedule, 7+ hours ahead)
         all_upcoming: list[UpcomingMatch] = []
         seen_keys: set[str] = set()
 
+        try:
+            ace_matches = await self.ace.get_volta_schedule()
+            for m in ace_matches:
+                key = _match_key(m)
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    all_upcoming.append(m)
+        except Exception as e:
+            logger.warning("AceOdds schedule failed: %s", e)
+
+        # 2. Near-term: ESportsBattle (~30 min lookahead, confirms timing)
         try:
             esb_matches = await self.esb.get_volta_schedule()
             for m in esb_matches:
@@ -120,7 +136,7 @@ class EsporfBot:
         except Exception as e:
             logger.warning("ESportsBattle schedule failed: %s", e)
 
-        # 2. Supplementary: BetsAPI (catches far-future + other leagues)
+        # 3. Supplementary: BetsAPI (other leagues + real-time)
         for lid in settings.tracked_league_ids:
             try:
                 schedule = await self.api.get_full_schedule(lid)
@@ -153,9 +169,12 @@ class EsporfBot:
             f"{lookahead // 3600}h — fetching odds...[/dim]"
         )
 
-        # Fetch real odds for each match (only for BetsAPI-sourced matches
-        # since ESportsBattle IDs won't work with BetsAPI's odds endpoint)
-        betsapi_matches = [m for m in all_upcoming if not m.match_id.startswith("esb_")]
+        # Fetch real odds for BetsAPI-sourced matches only
+        # (AceOdds/ESportsBattle IDs won't work with BetsAPI's odds endpoint)
+        betsapi_matches = [
+            m for m in all_upcoming
+            if not m.match_id.startswith(("esb_", "ace_"))
+        ]
         if betsapi_matches:
             await self.api.fetch_odds_batch(betsapi_matches)
         odds_count = sum(1 for m in all_upcoming if m.odds and m.odds.has_data)
@@ -182,10 +201,14 @@ class EsporfBot:
         for report in reports:
             display_matchup_report(report)
 
-        # Send alerts for NEW matchups only (avoid spamming same matchup)
+        # Send webhook alerts only for near-term matches (within 60 min)
+        # to avoid flooding Discord/Telegram with the full day's schedule.
+        # Console output above still shows everything for planning.
+        alert_horizon = int(time.time()) + 3600  # 60 min ahead
         new_reports = [
             r for r in reports_with_trends
             if r.match.match_id not in self._alerted_match_ids
+            and r.match.start_time <= alert_horizon
         ]
         if new_reports:
             await send_alerts(new_reports)
@@ -204,7 +227,7 @@ class EsporfBot:
             f"[bold blue]Esporf Trend Bot Starting[/bold blue]\n"
             f"  Tracking leagues: {settings.league_ids}\n"
             f"  Poll interval: {interval}s\n"
-            f"  Schedule: [bold green]ESportsBattle[/bold green] (primary) + BetsAPI\n"
+            f"  Schedule: [bold green]AceOdds[/bold green] + ESportsBattle + BetsAPI\n"
             f"  Odds: BetsAPI v2\n"
             f"  Min hit rate: {settings.min_hit_rate:.0%}\n"
             f"  Min sample size: {settings.min_sample_size}\n"
@@ -234,6 +257,7 @@ class EsporfBot:
         finally:
             await self.api.close()
             await self.esb.close()
+            await self.ace.close()
             self.db.close()
             console.print("\n[bold]Bot stopped.[/bold]")
 
@@ -255,4 +279,5 @@ async def scan_once() -> None:
     finally:
         await bot.api.close()
         await bot.esb.close()
+        await bot.ace.close()
         bot.db.close()
