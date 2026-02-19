@@ -14,7 +14,10 @@ class Settings(BaseSettings):
 
     # League IDs to track
     # 23114 = GT Leagues 12min, 37298 = GG League 8min, 38439 = Volta 6min
-    league_ids: str = "23114,37298,38439"
+    league_ids: str = "38439"
+
+    # Display timezone (e.g. "US/Eastern", "UTC")
+    timezone: str = "US/Eastern"
 
     # Polling
     poll_interval: int = 120  # seconds between scans for upcoming matches

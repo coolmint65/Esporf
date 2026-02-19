@@ -112,8 +112,21 @@ class UpcomingMatch:
             return None
 
     def starts_within(self, seconds: int) -> bool:
-        """Return True if the match starts within the given number of seconds."""
-        return self.is_live or (self.start_time - time.time()) <= seconds
+        """Return True if the match starts within the next *seconds* seconds.
+
+        Live matches always qualify. Past matches (already started but not
+        marked live) are excluded.
+        """
+        if self.is_live:
+            return True
+        delta = self.start_time - time.time()
+        return 0 <= delta <= seconds
+
+    @property
+    def minutes_until(self) -> int:
+        """Minutes until kickoff (0 if already started or live)."""
+        delta = self.start_time - time.time()
+        return max(0, int(delta // 60))
 
 
 @dataclass
