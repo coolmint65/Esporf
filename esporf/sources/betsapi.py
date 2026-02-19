@@ -11,6 +11,7 @@ Docs: https://betsapi.com/docs/
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -111,15 +112,24 @@ class BetsAPIClient:
         return [self._parse_upcoming(ev, league_id) for ev in data.get("results", [])]
 
     async def get_inplay_matches(self, league_id: int) -> list[UpcomingMatch]:
-        """Fetch live / in-play events for a league."""
+        """Fetch live / in-play events for a league.
+
+        BetsAPI sometimes lists eSoccer matches as in-play before they've
+        actually kicked off (the match appears only ~2 min before start and
+        is immediately flagged live).  We use ``start_time`` to determine
+        the real status: if kickoff is still in the future, treat the match
+        as upcoming rather than live.
+        """
         data = await self._request(
             "/events/inplay",
             params={"sport_id": SPORT_ID, "league_id": league_id},
         )
+        now = int(time.time())
         matches = []
         for ev in data.get("results", []):
             m = self._parse_upcoming(ev, league_id)
-            m.is_live = True
+            # Only trust the "live" designation when kickoff is in the past
+            m.is_live = m.start_time <= now
             matches.append(m)
         return matches
 

@@ -90,14 +90,29 @@ class EsporfBot:
             except Exception as e:
                 logger.warning("Failed to fetch ended matches for league %d: %s", lid, e)
 
-        # Fetch upcoming matches (only pre-match, starting within 1 hour)
+        # Fetch upcoming AND inplay matches, then deduplicate.
+        # BetsAPI often lists eSoccer Volta matches as inplay immediately
+        # (even before kickoff), so we must check both endpoints to avoid
+        # missing matches that skip the "upcoming" window entirely.
+        seen_ids: set[str] = set()
         all_upcoming = []
         for lid in settings.tracked_league_ids:
             try:
                 upcoming = await self.api.get_upcoming_matches(lid)
-                all_upcoming.extend(upcoming)
+                for m in upcoming:
+                    if m.match_id not in seen_ids:
+                        seen_ids.add(m.match_id)
+                        all_upcoming.append(m)
             except Exception as e:
                 logger.warning("Failed to fetch upcoming for league %d: %s", lid, e)
+            try:
+                inplay = await self.api.get_inplay_matches(lid)
+                for m in inplay:
+                    if m.match_id not in seen_ids:
+                        seen_ids.add(m.match_id)
+                        all_upcoming.append(m)
+            except Exception as e:
+                logger.warning("Failed to fetch inplay for league %d: %s", lid, e)
 
         # Only keep matches starting within 1 hour (pre-match only)
         imminent = [m for m in all_upcoming if m.starts_within(3600)]
