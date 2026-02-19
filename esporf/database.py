@@ -12,7 +12,7 @@ import os
 import sqlite3
 
 from esporf.config import settings
-from esporf.models import MatchResult
+from esporf.models import MatchResult, extract_handle
 
 logger = logging.getLogger(__name__)
 
@@ -112,24 +112,43 @@ class MatchDatabase:
 
     # ── Reads ────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _handle_pattern(player: str) -> str:
+        """Build a LIKE pattern that matches any team name for a player handle.
+
+        'Bayer 04 (Sheva)' → '%(Sheva)' so it matches 'Arsenal (Sheva)' too.
+        Plain names without parentheses (e.g. 'Alpha') match exactly.
+        """
+        handle = extract_handle(player)
+        # If the handle is the same as the input, the name has no parentheses
+        # — match it exactly rather than as a broken LIKE pattern.
+        if handle == player:
+            return player
+        return f"%({handle})"
+
     def get_player_matches(
         self, player: str, limit: int = 50, league_id: int | None = None
     ) -> list[MatchResult]:
-        """Get a player's most recent matches (home or away)."""
+        """Get a player's most recent matches (home or away).
+
+        Matches by handle so 'Bayer 04 (Sheva)' finds matches where
+        the same player used any team name.
+        """
         conn = self._get_conn()
+        pattern = self._handle_pattern(player)
         if league_id:
             rows = conn.execute(
                 """SELECT * FROM matches
-                   WHERE (home = ? OR away = ?) AND league_id = ?
+                   WHERE (home LIKE ? OR away LIKE ?) AND league_id = ?
                    ORDER BY start_time DESC LIMIT ?""",
-                (player, player, league_id, limit),
+                (pattern, pattern, league_id, limit),
             ).fetchall()
         else:
             rows = conn.execute(
                 """SELECT * FROM matches
-                   WHERE home = ? OR away = ?
+                   WHERE home LIKE ? OR away LIKE ?
                    ORDER BY start_time DESC LIMIT ?""",
-                (player, player, limit),
+                (pattern, pattern, limit),
             ).fetchall()
         return [self._row_to_match(r) for r in rows]
 
@@ -138,18 +157,19 @@ class MatchDatabase:
     ) -> list[MatchResult]:
         """Get matches where the player was the home side."""
         conn = self._get_conn()
+        pattern = self._handle_pattern(player)
         if league_id:
             rows = conn.execute(
                 """SELECT * FROM matches
-                   WHERE home = ? AND league_id = ?
+                   WHERE home LIKE ? AND league_id = ?
                    ORDER BY start_time DESC LIMIT ?""",
-                (player, league_id, limit),
+                (pattern, league_id, limit),
             ).fetchall()
         else:
             rows = conn.execute(
-                """SELECT * FROM matches WHERE home = ?
+                """SELECT * FROM matches WHERE home LIKE ?
                    ORDER BY start_time DESC LIMIT ?""",
-                (player, limit),
+                (pattern, limit),
             ).fetchall()
         return [self._row_to_match(r) for r in rows]
 
@@ -158,18 +178,19 @@ class MatchDatabase:
     ) -> list[MatchResult]:
         """Get matches where the player was the away side."""
         conn = self._get_conn()
+        pattern = self._handle_pattern(player)
         if league_id:
             rows = conn.execute(
                 """SELECT * FROM matches
-                   WHERE away = ? AND league_id = ?
+                   WHERE away LIKE ? AND league_id = ?
                    ORDER BY start_time DESC LIMIT ?""",
-                (player, league_id, limit),
+                (pattern, league_id, limit),
             ).fetchall()
         else:
             rows = conn.execute(
-                """SELECT * FROM matches WHERE away = ?
+                """SELECT * FROM matches WHERE away LIKE ?
                    ORDER BY start_time DESC LIMIT ?""",
-                (player, limit),
+                (pattern, limit),
             ).fetchall()
         return [self._row_to_match(r) for r in rows]
 
@@ -178,11 +199,13 @@ class MatchDatabase:
     ) -> list[MatchResult]:
         """Get head-to-head matches between two players (either side)."""
         conn = self._get_conn()
+        pa = self._handle_pattern(player_a)
+        pb = self._handle_pattern(player_b)
         rows = conn.execute(
             """SELECT * FROM matches
-               WHERE (home = ? AND away = ?) OR (home = ? AND away = ?)
+               WHERE (home LIKE ? AND away LIKE ?) OR (home LIKE ? AND away LIKE ?)
                ORDER BY start_time DESC LIMIT ?""",
-            (player_a, player_b, player_b, player_a, limit),
+            (pa, pb, pb, pa, limit),
         ).fetchall()
         return [self._row_to_match(r) for r in rows]
 

@@ -8,6 +8,27 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 
+_HANDLE_RE = re.compile(r"\(([^)]+)\)\s*$")
+
+
+def extract_handle(name: str) -> str:
+    """Extract the player handle from a 'Team (Handle)' string.
+
+    Returns the handle if found, otherwise the full name unchanged.
+    Examples:
+        'Bayer 04 (Sheva)' → 'Sheva'
+        'Arsenal (Sheva)' → 'Sheva'
+        'Sheva'            → 'Sheva'
+    """
+    m = _HANDLE_RE.search(name)
+    return m.group(1) if m else name
+
+
+def _same_player(a: str, b: str) -> bool:
+    """Check if two player strings refer to the same player by handle."""
+    return extract_handle(a) == extract_handle(b)
+
+
 class League(Enum):
     """Tracked eSoccer leagues with BetsAPI league IDs."""
 
@@ -69,22 +90,24 @@ class MatchResult:
 
     def goals_for(self, player: str) -> int:
         """Goals scored by a specific player in this match."""
-        if player == self.home:
+        if _same_player(player, self.home):
             return self.home_score
-        elif player == self.away:
+        elif _same_player(player, self.away):
             return self.away_score
         return 0
 
     def goals_against(self, player: str) -> int:
         """Goals conceded by a specific player in this match."""
-        if player == self.home:
+        if _same_player(player, self.home):
             return self.away_score
-        elif player == self.away:
+        elif _same_player(player, self.away):
             return self.home_score
         return 0
 
     def won_by(self, player: str) -> bool:
-        return self.winner == player
+        if self.winner is None:
+            return False
+        return _same_player(player, self.winner)
 
     def score_str(self) -> str:
         return f"{self.home_score}-{self.away_score}"
