@@ -284,19 +284,21 @@ class BetsAPIClient:
         cadence: int = 540,  # 9 minutes in seconds
         matches_per_slot: int = 2,
         session_gap: int = 1800,  # 30 min = new session boundary
+        plays_per_pair: int = 2,  # double round-robin: each pair plays 2x
     ) -> list[UpcomingMatch]:
         """Predict upcoming matches from the ended-match cadence.
 
         BetsAPI doesn't list Volta matches more than ~2 minutes before
-        kickoff, but the schedule follows a predictable round-robin
+        kickoff, but the schedule follows a predictable double round-robin
         pattern: 5 players, 2 concurrent matches every ~9 minutes,
-        cycling through all C(5,2)=10 matchups.
+        cycling through all C(5,2)=10 unique matchups × 2 = 20 total
+        matches per session.
 
         This method:
         1. Identifies the current session's players from recent results
            (including any inplay/upcoming that haven't ended yet)
-        2. Determines which matchups haven't been played yet
-        3. Predicts when each remaining matchup will occur
+        2. Counts how many times each pair has played (expects 2 per pair)
+        3. Predicts remaining matches (rematches + first-time matchups)
         4. Returns them as UpcomingMatch objects
 
         Args:
@@ -308,6 +310,8 @@ class BetsAPIClient:
             cadence: Seconds between match slots (default 540 = 9 min)
             matches_per_slot: Concurrent matches per slot (default 2)
             session_gap: Seconds gap that indicates a new session
+            plays_per_pair: How many times each pair plays (default 2
+                for Volta's double round-robin)
 
         Returns:
             List of predicted UpcomingMatch entries for remaining matchups.
@@ -378,22 +382,38 @@ class BetsAPIClient:
         if len(players) < 2:
             return []
 
-        # Find all matchups already played/in-progress in this session
-        played: set[tuple[str, str]] = set()
+        # Count how many times each unordered pair has been played.
+        # Volta uses a double round-robin: each pair plays 2x (home/away swap).
+        pair_counts: dict[tuple[str, str], int] = {}
         for _, home, away in session:
             pair = tuple(sorted([home, away]))
-            played.add(pair)
+            pair_counts[pair] = pair_counts.get(pair, 0) + 1
 
-        # All possible matchups in the round-robin
-        all_matchups = {tuple(sorted(pair)) for pair in combinations(players, 2)}
-        remaining = all_matchups - played
+        # Build the list of remaining matches: each pair needs
+        # plays_per_pair total plays; generate the deficit.
+        # Separate into "first play" and "rematch" rounds so the same
+        # pair doesn't appear twice in the same time slot.
+        all_pairs = {tuple(sorted(pair)) for pair in combinations(players, 2)}
+        round1: list[tuple[str, str]] = []  # first remaining play
+        round2: list[tuple[str, str]] = []  # second remaining play (rematch)
+        for pair in sorted(all_pairs):
+            played_count = pair_counts.get(pair, 0)
+            deficit = max(0, plays_per_pair - played_count)
+            if deficit >= 1:
+                round1.append(pair)
+            if deficit >= 2:
+                round2.append(pair)
+        remaining_list = round1 + round2
 
-        if not remaining:
-            # Full round complete — predict next full round
-            remaining = all_matchups
+        if not remaining_list:
+            return []
 
-        # Most recent match/live time = basis for prediction
+        # Find the latest start time among currently live matches (not just
+        # ended), so predictions start AFTER the current live slot finishes.
+        # Matches that started within the last ~7 minutes are "live".
         latest_time = max(t for t, _, _ in session)
+        live_cutoff = now - (cadence - 60)  # matches started < ~8 min ago are live
+        has_live = any(t >= live_cutoff for t, _, _ in session)
 
         # If the latest activity is more than cadence*3 ago, the session
         # might be over. Don't predict stale sessions.
@@ -404,17 +424,17 @@ class BetsAPIClient:
             )
             return []
 
-        # Pair remaining matchups into time slots, starting from the next
-        # expected slot after the most recent match
-        remaining_list = sorted(remaining)  # deterministic order
-        predicted: list[UpcomingMatch] = []
-
-        # Calculate the next slot time: latest_time + cadence, but if that's
-        # in the past, fast-forward to the next future slot
+        # Calculate the first predicted slot.
+        # If matches are currently live, the next slot is after they finish:
+        # latest_time + cadence. We also ensure it's at least 2 minutes
+        # in the future so we don't predict matches at "in 0 min".
         next_slot = latest_time + cadence
-        while next_slot <= now:
+        min_future = now + 120  # at least 2 minutes from now
+        while next_slot < min_future:
             next_slot += cadence
 
+        # Pair remaining matchups into time slots
+        predicted: list[UpcomingMatch] = []
         for i in range(0, len(remaining_list), matches_per_slot):
             slot_time = next_slot + (cadence * (i // matches_per_slot))
 
@@ -434,14 +454,16 @@ class BetsAPIClient:
                 )
 
         if predicted:
+            total_expected = len(all_pairs) * plays_per_pair
+            total_played = sum(pair_counts.values())
             logger.info(
-                "Predicted %d upcoming matches from %d remaining matchups "
-                "(session: %d players, %d/%d played)",
+                "Predicted %d upcoming matches (%d remaining in session, "
+                "%d/%d played, %d players)",
                 len(predicted),
-                len(remaining),
+                len(remaining_list),
+                total_played,
+                total_expected,
                 len(players),
-                len(played),
-                len(all_matchups),
             )
 
         return predicted
