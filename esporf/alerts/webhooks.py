@@ -52,7 +52,7 @@ def _build_discord_embed(report: MatchupReport) -> dict:
     time_str = _kickoff_est(match.start_time)
 
     if minutes > 0:
-        time_tag = f"{time_str}  ({minutes} min)"
+        time_tag = f"{time_str}  (in {minutes} min)"
     else:
         time_tag = f"{time_str}  (LIVE)"
 

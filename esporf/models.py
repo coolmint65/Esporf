@@ -160,7 +160,7 @@ class Trend:
     Example: "Player A vs Player B - Over 5.5 goals in 15/20 matches (75%)"
     """
 
-    category: str  # e.g. "Over 5.5 Goals", "BTTS - Yes", "Home Win"
+    category: str  # e.g. "Over 5.5 Goals", "Win", "Player Over 1.5 Scored"
     description: str  # human-readable full description
     hits: int  # number of times the trend hit
     sample_size: int  # total matches analyzed
@@ -184,7 +184,7 @@ class Trend:
 class BetPick:
     """The single best bet recommendation derived from qualifying trends."""
 
-    market: str  # e.g. "Over 5.5 Goals", "BTTS - Yes"
+    market: str  # e.g. "Over 5.5 Goals", "Player Over 1.5 Scored"
     confidence: float  # weighted score combining hit rate + sample size + agreement
     supporting_trends: list[Trend]  # trends that back this pick
     reason: str  # human-readable explanation
@@ -274,7 +274,7 @@ class MatchupReport:
         For Under markets the tightest = lowest line (Under 3.5 > Under 5.5).
         For Over  markets the tightest = highest line (Over 5.5 > Over 3.5).
 
-        Non-line markets (BTTS, Win, etc.) are scored normally.
+        Non-line markets (Win, Draw, etc.) are scored normally.
 
         Each candidate is also checked against a rough implied-probability
         ceiling so we don't recommend something that would be -300+.
@@ -361,43 +361,73 @@ def _trend_source_label(trend_type: str) -> str:
 
 # ── Line-selection helpers ──────────────────────────────────────
 
-_LINE_RE = re.compile(r"(Over|Under)\s+(\d+(?:\.\d+)?)\s+Goals", re.IGNORECASE)
+_TOTAL_LINE_RE = re.compile(r"(Over|Under)\s+(\d+(?:\.\d+)?)\s+Goals$", re.IGNORECASE)
+_PLAYER_LINE_RE = re.compile(
+    r"(?:Player\s+)?(Over)\s+(\d+(?:\.\d+)?)\s+(?:Goals|Scored)$", re.IGNORECASE
+)
 
 
 def _parse_line(market: str) -> tuple[str, float] | None:
-    """Extract direction and line value from a market name.
+    """Extract direction and line value from a total-goals market.
 
-    Returns e.g. ("Under", 4.5) or None for non-line markets.
+    Returns e.g. ("Under", 4.5) or None for non-total-goals markets.
     """
-    m = _LINE_RE.match(market)
+    m = _TOTAL_LINE_RE.match(market)
     if not m:
         return None
     return m.group(1), float(m.group(2))
 
 
+def _parse_player_line(market: str) -> tuple[str, str, float] | None:
+    """Extract player prefix, direction, line from a player goals market.
+
+    Handles both 'Player Over 1.5 Scored' and 'Alpha Over 2.5 Goals'.
+    Returns e.g. ("Player", "Over", 1.5) or ("Alpha", "Over", 2.5) or None.
+    """
+    m = _PLAYER_LINE_RE.match(market)
+    if m:
+        return "Player", m.group(1), float(m.group(2))
+    # Try "{Name} Over X.5 Goals"
+    name_re = re.match(r"(.+?)\s+(Over)\s+(\d+(?:\.\d+)?)\s+Goals$", market, re.IGNORECASE)
+    if name_re:
+        return name_re.group(1), name_re.group(2), float(name_re.group(3))
+    return None
+
+
 def _collapse_to_tightest_lines(
     groups: dict[str, list[Trend]],
 ) -> dict[str, list[Trend]]:
-    """For Over/Under total-goals markets, keep only the tightest line.
+    """For Over/Under markets, keep only the tightest line per group.
 
     "Tightest" = lowest Under line or highest Over line that qualifies,
     because those correspond to the best available odds.
+
+    Handles both total-goals lines and per-player team-total-goals lines.
     """
     # Separate line-markets from non-line markets
     under_lines: dict[float, tuple[str, list[Trend]]] = {}
     over_lines: dict[float, tuple[str, list[Trend]]] = {}
+    # Per-player lines: player_name → {line: (market, trends)}
+    player_over_lines: dict[str, dict[float, tuple[str, list[Trend]]]] = {}
     result: dict[str, list[Trend]] = {}
 
     for market, trends in groups.items():
         parsed = _parse_line(market)
-        if parsed is None:
-            result[market] = trends
+        if parsed is not None:
+            direction, line = parsed
+            if direction.lower() == "under":
+                under_lines[line] = (market, trends)
+            else:
+                over_lines[line] = (market, trends)
             continue
-        direction, line = parsed
-        if direction.lower() == "under":
-            under_lines[line] = (market, trends)
-        else:
-            over_lines[line] = (market, trends)
+
+        player_parsed = _parse_player_line(market)
+        if player_parsed is not None:
+            player, _direction, line = player_parsed
+            player_over_lines.setdefault(player, {})[line] = (market, trends)
+            continue
+
+        result[market] = trends
 
     # Keep only the tightest Under (lowest line value)
     if under_lines:
@@ -411,6 +441,12 @@ def _collapse_to_tightest_lines(
         market, trends = over_lines[tightest]
         result[market] = trends
 
+    # Keep only the tightest Over per player (highest line)
+    for _player, lines in player_over_lines.items():
+        tightest = max(lines)
+        market, trends = lines[tightest]
+        result[market] = trends
+
     return result
 
 
@@ -421,7 +457,7 @@ def _estimate_implied_probability(market: str) -> float | None:
     average ~5 total goals). Anything above ~64% implied means the book
     would price it at -180 or worse — not worth betting.
 
-    Returns None for non-line markets (BTTS, Win, etc.).
+    Returns None for non-line markets (Win, Draw, etc.).
     """
     parsed = _parse_line(market)
     if parsed is None:

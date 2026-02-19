@@ -117,7 +117,7 @@ class TrendAnalyzer:
         ))
 
         # Player A scores X+ goals in H2H
-        for line in [0.5, 1.5, 2.5, 3.5]:
+        for line in [1.5, 2.5, 3.5]:
             hits = sum(1 for m in matches if m.goals_for(player_a) > line)
             trends.append(self._make_trend(
                 category=f"{player_a} Over {line} Goals",
@@ -127,7 +127,7 @@ class TrendAnalyzer:
                 desc_template=f"{player_a} scores Over {line} vs {player_b}",
             ))
 
-        for line in [0.5, 1.5, 2.5, 3.5]:
+        for line in [1.5, 2.5, 3.5]:
             hits = sum(1 for m in matches if m.goals_for(player_b) > line)
             trends.append(self._make_trend(
                 category=f"{player_b} Over {line} Goals",
@@ -204,8 +204,8 @@ class TrendAnalyzer:
                 desc_template=f"{player} {suffix} — Under {line} total goals",
             ))
 
-        # Player goals scored over/under
-        for line in [0.5, 1.5, 2.5, 3.5]:
+        # Player goals scored over/under (1.5+ only — 0.5 not on book)
+        for line in [1.5, 2.5, 3.5]:
             hits = sum(1 for m in matches if m.goals_for(player) > line)
             trends.append(self._make_trend(
                 category=f"Player Over {line} Scored",

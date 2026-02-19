@@ -84,7 +84,7 @@ class TestH2HTrends:
         assert "Over 6.5 Goals" in categories
 
     def test_h2h_player_goals_trend(self, db):
-        """All 15 H2H matches 4-3 → home player scores Over 0.5 in every match."""
+        """All 15 H2H matches 4-3 → Alpha scores 3+ every game → Over 2.5 hits."""
         _seed_high_scoring_h2h(db)
         analyzer = TrendAnalyzer(db)
         analyzer.min_sample = 10
