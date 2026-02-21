@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -361,6 +362,7 @@ class MatchupReport:
     match: UpcomingMatch
     trends: list[Trend]
     generated_at: float = field(default_factory=time.time)
+    avg_goals: float | None = None  # match-specific expected total goals
 
     @property
     def has_trends(self) -> bool:
@@ -505,17 +507,19 @@ class MatchupReport:
     def _best_bet_estimated(
         self, market_groups: dict[str, list[Trend]]
     ) -> BetPick | None:
-        """Fallback: pick the best bet using estimated implied probabilities.
+        """Fallback: pick the best bet using per-match implied probabilities.
 
-        All qualifying lines compete on their merits — hit rate, number of
-        supporting trends, sample size, and estimated edge.  Lines where the
-        book's implied probability exceeds 64 % are filtered out (too expensive
-        to bet).
+        Uses match-specific avg_goals (Poisson model) when available to
+        estimate what the sportsbook would price each line at. Lines where
+        the implied probability exceeds 64% are filtered out (too expensive).
+
+        Both overs and unders compete on equal footing — if Under 6.5 has
+        a higher edge than Over 5.5 for this matchup, the under wins.
         """
         max_implied = 0.64
         filtered: dict[str, list[Trend]] = {}
         for market, trends in market_groups.items():
-            implied = _estimate_implied_probability(market)
+            implied = _match_implied_probability(market, self.avg_goals)
             if implied is not None and implied > max_implied:
                 continue
             filtered[market] = trends
@@ -526,21 +530,23 @@ class MatchupReport:
         best_market: str | None = None
         best_score = 0.0
         best_trends: list[Trend] = []
+        best_edge: float = 0.0
 
         for market, trends in filtered.items():
             agreement = len(trends)
             avg_rate = sum(t.hit_rate for t in trends) / agreement
             avg_sample = sum(t.sample_size for t in trends) / agreement
 
-            # Estimated edge: hit_rate minus estimated implied probability
-            implied = _estimate_implied_probability(market)
+            # Per-match implied probability (Poisson when avg_goals known)
+            implied = _match_implied_probability(market, self.avg_goals)
             if implied is not None:
                 edge = max(avg_rate - implied, 0.0)
-                edge_norm = min(edge / 0.30, 1.0)  # 30 %+ edge → perfect
+                edge_norm = min(edge / 0.30, 1.0)  # 30%+ edge → perfect
             else:
+                edge = 0.0
                 edge_norm = 0.5  # neutral for non-line markets
 
-            # Score: 40 % hit rate, 25 % agreement, 15 % sample, 20 % edge
+            # Score: 40% hit rate, 25% agreement, 15% sample, 20% edge
             score = (
                 avg_rate * 0.40
                 + min(agreement / 5, 1.0) * 0.25
@@ -551,15 +557,26 @@ class MatchupReport:
                 best_score = score
                 best_market = market
                 best_trends = trends
+                best_edge = edge
 
         if best_market is None:
             return None
 
         sources = ", ".join(sorted({_trend_source_label(t.trend_type) for t in best_trends}))
         top_rate = max(t.hit_rate for t in best_trends)
+
+        # Include avg goals context and edge in the reason
+        avg_ctx = ""
+        if self.avg_goals is not None:
+            avg_ctx = f", matchup avg {self.avg_goals:.1f} goals"
+
+        edge_ctx = ""
+        if best_edge > 0:
+            edge_ctx = f", {best_edge:.0%} est. edge"
+
         reason = (
             f"{best_market} backed by {len(best_trends)} trend(s) "
-            f"({sources}) — top hit rate {top_rate:.0%}"
+            f"({sources}) — top hit rate {top_rate:.0%}{edge_ctx}{avg_ctx}"
         )
 
         return BetPick(
@@ -567,6 +584,7 @@ class MatchupReport:
             confidence=best_score,
             supporting_trends=best_trends,
             reason=reason,
+            edge=best_edge if best_edge > 0 else None,
         )
 
 
@@ -596,12 +614,29 @@ def _parse_line(market: str) -> tuple[str, float] | None:
 
 
 
-def _estimate_implied_probability(market: str) -> float | None:
-    """Rough estimate of the sportsbook implied probability for a line.
+def _poisson_over_prob(avg_goals: float, line: float) -> float:
+    """Probability that total goals exceeds a .5 line using Poisson distribution.
 
-    These are approximate fair-odds for eSoccer Volta (6-min games that
-    average ~5 total goals). Anything above ~64% implied means the book
-    would price it at -180 or worse — not worth betting.
+    For line=5.5 and avg_goals=6.0:
+        P(total > 5.5) = P(total >= 6) = 1 - P(total <= 5)
+    """
+    if avg_goals <= 0:
+        return 0.0
+    k_max = int(line)  # 5.5 → 5, so P(total <= 5)
+    cdf = 0.0
+    for k in range(k_max + 1):
+        cdf += (avg_goals ** k) * math.exp(-avg_goals) / math.factorial(k)
+    return max(0.0, min(1.0, 1.0 - cdf))
+
+
+def _match_implied_probability(
+    market: str, avg_goals: float | None
+) -> float | None:
+    """Estimate the implied probability for a line using match-specific data.
+
+    When avg_goals is available, uses Poisson distribution to compute
+    the probability for this specific matchup. Falls back to a generic
+    table when no match data exists.
 
     Returns None for non-line markets (Win, Draw, etc.).
     """
@@ -611,16 +646,28 @@ def _estimate_implied_probability(market: str) -> float | None:
 
     direction, line = parsed
 
-    # Rough implied probabilities for typical Volta games:
-    #   Under 7.5 ≈ 95%+   (-2000)  skip
-    #   Under 6.5 ≈ 88%    (-700)   skip
-    #   Under 5.5 ≈ 75%    (-300)   skip
-    #   Under 4.5 ≈ 58%    (-140)   bettable
-    #   Under 3.5 ≈ 38%    (+160)   bettable
-    #   Over  2.5 ≈ 85%    (-550)   skip
-    #   Over  3.5 ≈ 72%    (-250)   skip
-    #   Over  4.5 ≈ 52%    (-110)   bettable
-    #   Over  5.5 ≈ 30%    (+230)   bettable
+    if avg_goals is not None:
+        over_prob = _poisson_over_prob(avg_goals, line)
+        if direction.lower() == "over":
+            return over_prob
+        else:
+            return 1.0 - over_prob
+
+    # Fallback: generic Volta averages (~5 total goals)
+    return _estimate_implied_probability_generic(market)
+
+
+def _estimate_implied_probability_generic(market: str) -> float | None:
+    """Generic implied probability table for Volta (6-min, ~5 goal avg).
+
+    Used only when no match-specific data is available.
+    """
+    parsed = _parse_line(market)
+    if parsed is None:
+        return None
+
+    direction, line = parsed
+
     under_implied = {
         2.5: 0.22, 3.5: 0.38, 4.5: 0.58,
         5.5: 0.75, 6.5: 0.88, 7.5: 0.95,

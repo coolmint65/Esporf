@@ -14,7 +14,7 @@ import logging
 
 from esporf.config import settings
 from esporf.database import MatchDatabase
-from esporf.models import MatchResult, MatchupReport, Trend, UpcomingMatch
+from esporf.models import MatchResult, MatchupReport, Trend, UpcomingMatch, _poisson_over_prob
 
 logger = logging.getLogger(__name__)
 
@@ -32,16 +32,45 @@ class TrendAnalyzer:
     def analyze_matchup(self, match: UpcomingMatch) -> MatchupReport:
         """Run all trend checks for an upcoming match and return qualifying trends.
 
-        When the match has real odds data, we analyze the specific lines
-        offered by the sportsbook (e.g. 4.5, 5.5, 8.5) in addition to our
-        configured lines. This ensures we check every line the book is offering.
+        Line selection is match-specific:
+        1. When real odds are available → only analyze lines the book offers
+        2. When no odds → estimate which lines the book would offer based on
+           the matchup's average total goals (Poisson model)
+
+        This prevents recommending bets on lines the sportsbook doesn't carry
+        (e.g. Over 4.5 when the matchup averages 7 goals).
         """
-        # Determine which goal lines to check: config lines + any offered by the book
-        lines_to_check = set(self.goal_lines)
+        # Compute match-specific average total goals for smarter line selection
+        avg_goals = self._compute_matchup_avg_goals(
+            match.home, match.away, match.league_id
+        )
+
+        # Determine which goal lines to analyze based on what the book offers
         if match.odds and match.odds.has_data:
-            for offered in match.odds.available_lines:
-                lines_to_check.add(offered)
-        check_lines = sorted(lines_to_check)
+            # Real odds — only analyze lines the sportsbook is actually offering
+            check_lines = sorted(match.odds.available_lines)
+        elif avg_goals is not None:
+            # No real odds — estimate which lines the book would offer using
+            # the matchup average. A book typically offers lines where neither
+            # side is a >85% favorite (Poisson-estimated).
+            candidate_lines = sorted(
+                set(self.goal_lines)
+                | {2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5}
+            )
+            check_lines = [
+                line for line in candidate_lines
+                if 0.10 <= _poisson_over_prob(avg_goals, line) <= 0.90
+            ]
+            if not check_lines:
+                # Fallback if Poisson filtering is too aggressive
+                check_lines = sorted(self.goal_lines)
+            logger.debug(
+                "Matchup avg %.1f goals → estimated lines: %s",
+                avg_goals, check_lines,
+            )
+        else:
+            # No match data at all — use configured defaults
+            check_lines = sorted(self.goal_lines)
 
         trends: list[Trend] = []
 
@@ -63,7 +92,7 @@ class TrendAnalyzer:
         # Sort by hit rate descending, then sample size descending
         trends.sort(key=lambda t: (t.hit_rate, t.sample_size), reverse=True)
 
-        return MatchupReport(match=match, trends=trends)
+        return MatchupReport(match=match, trends=trends, avg_goals=avg_goals)
 
     # ── Head-to-Head Trends ──────────────────────────────────────────
 
@@ -212,6 +241,53 @@ class TrendAnalyzer:
         ))
 
         return [t for t in trends if t is not None]
+
+    # ── Match-specific statistics ────────────────────────────────────
+
+    def _compute_matchup_avg_goals(
+        self, home: str, away: str, league_id: int | None
+    ) -> float | None:
+        """Compute expected total goals for this specific matchup.
+
+        Uses a weighted average:
+        - H2H history (2× weight — most predictive of this exact matchup)
+        - Home player overall (1× weight)
+        - Away player overall (1× weight)
+
+        Returns None if no data is available at all.
+        """
+        h2h = self.db.get_h2h_matches(home, away, limit=self.last_n)
+        home_all = self.db.get_player_matches(home, limit=self.last_n, league_id=league_id)
+        away_all = self.db.get_player_matches(away, limit=self.last_n, league_id=league_id)
+
+        components: list[tuple[float, float]] = []  # (avg, weight)
+
+        if h2h:
+            h2h_avg = sum(m.total_goals for m in h2h) / len(h2h)
+            components.append((h2h_avg, 2.0))
+
+        if home_all:
+            home_avg = sum(m.total_goals for m in home_all) / len(home_all)
+            components.append((home_avg, 1.0))
+
+        if away_all:
+            away_avg = sum(m.total_goals for m in away_all) / len(away_all)
+            components.append((away_avg, 1.0))
+
+        if not components:
+            return None
+
+        total_weight = sum(w for _, w in components)
+        avg = sum(v * w for v, w in components) / total_weight
+
+        logger.debug(
+            "%s vs %s: avg_goals=%.1f (H2H=%s, home=%s, away=%s)",
+            home, away, avg,
+            f"{h2h_avg:.1f}" if h2h else "N/A",
+            f"{home_avg:.1f}" if home_all else "N/A",
+            f"{away_avg:.1f}" if away_all else "N/A",
+        )
+        return avg
 
     # ── Helpers ──────────────────────────────────────────────────────
 

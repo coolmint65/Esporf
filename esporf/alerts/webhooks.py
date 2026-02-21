@@ -91,10 +91,15 @@ def _build_discord_embed(report: MatchupReport) -> dict:
         f"**{top_rate:.0%}** hit rate  ({total_hits}/{total_sample}){edge_str}",
     ]
 
-    # Show offered lines when available
+    # Show match context: avg goals + offered lines
+    context_parts = []
+    if report.avg_goals is not None:
+        context_parts.append(f"Matchup avg: **{report.avg_goals:.1f}** goals")
     if match.odds and match.odds.total_lines:
         offered = ", ".join(str(ol.line) for ol in match.odds.total_lines)
-        lines.append(f"\nLines offered: {offered}")
+        context_parts.append(f"Lines offered: {offered}")
+    if context_parts:
+        lines.append("\n" + "  |  ".join(context_parts))
 
     color = _confidence_color(top_rate)
 
@@ -180,11 +185,15 @@ async def send_telegram_alert(reports: list[MatchupReport]) -> None:
         if pick.edge is not None and pick.edge > 0:
             edge_str = f" | {pick.edge:.0%} edge"
 
+        avg_str = ""
+        if report.avg_goals is not None:
+            avg_str = f" | Avg: {report.avg_goals:.1f} goals"
+
         lines = [
             f"<b>{home_display} vs {away_display}</b>",
             f"<b>{market}{odds_str} — {units}</b>",
             time_detail,
-            f"History: {total_hits}/{total_sample} ({top_rate:.0%}){edge_str}",
+            f"History: {total_hits}/{total_sample} ({top_rate:.0%}){edge_str}{avg_str}",
         ]
 
         msg = "\n".join(lines)

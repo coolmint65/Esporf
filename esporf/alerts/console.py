@@ -73,12 +73,15 @@ def display_matchup_report(report: MatchupReport) -> None:
         f"[bold]{top_rate:.0%}[/] hit rate  ({total_hits}/{total_sample}){edge_str}"
     )
 
-    # Show available lines if odds were fetched
+    # Show match context: avg goals + available lines
+    context_parts: list[str] = []
+    if report.avg_goals is not None:
+        context_parts.append(f"Avg: {report.avg_goals:.1f} goals")
     if match.odds and match.odds.has_data:
-        lines_display = "  ".join(
-            f"{ol.line}" for ol in match.odds.total_lines
-        )
-        body += f"\n[dim]Lines: {lines_display}[/dim]"
+        lines_display = "  ".join(f"{ol.line}" for ol in match.odds.total_lines)
+        context_parts.append(f"Lines: {lines_display}")
+    if context_parts:
+        body += f"\n[dim]{' | '.join(context_parts)}[/dim]"
 
     home = extract_handle(match.home)
     away = extract_handle(match.away)
