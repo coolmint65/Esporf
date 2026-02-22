@@ -1,6 +1,43 @@
 # Deploying Esporf 24/7
 
-## Quick Start (any Linux VPS — DigitalOcean, Hetzner, etc.)
+## Windows 10/11
+
+### 1. Clone and install
+
+```
+git clone https://github.com/coolmint65/Esporf.git C:\Esporf
+cd C:\Esporf
+pip install -e .
+```
+
+### 2. Configure
+
+Copy your `.env` file into `C:\Esporf`.
+
+### 3. Install as a startup task
+
+Right-click `deploy\install-task.bat` and select **Run as administrator**. This registers Esporf to start automatically every time you log in.
+
+### 4. Start it now
+
+Either reboot/re-login, or run:
+```
+schtasks /run /tn "Esporf Bot"
+```
+
+### Managing on Windows
+
+```
+schtasks /run /tn "Esporf Bot"       :: start
+schtasks /end /tn "Esporf Bot"       :: stop
+schtasks /delete /tn "Esporf Bot" /f :: remove
+```
+
+You can also manage it in **Task Scheduler** (search for it in the Start menu, look for "Esporf Bot" in the task list).
+
+---
+
+## Linux VPS (DigitalOcean, Hetzner, etc.)
 
 ### 1. Clone and install
 
