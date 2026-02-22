@@ -44,84 +44,29 @@ def _build_discord_embed(report: MatchupReport) -> dict:
     league_name = league.display_name if league else f"League {match.league_id}"
     ts = match.start_time
 
-    # History stats
     top_rate = max(t.hit_rate for t in pick.supporting_trends)
-    total_hits = sum(t.hits for t in pick.supporting_trends)
-    total_sample = sum(t.sample_size for t in pick.supporting_trends)
-
-    units = pick.units_display
 
     home_handle = extract_handle(match.home)
     away_handle = extract_handle(match.away)
-
-    # Show full team names so user can match to sportsbook,
-    # with handles in bold for quick identification
     home_display = match.home if home_handle != match.home else home_handle
     away_display = match.away if away_handle != match.away else away_handle
-
-    # Build odds string if real odds are attached
-    has_real_odds = pick.odds_line is not None
-    odds_str = ""
-    if pick.american_odds:
-        odds_str = f"  ({pick.american_odds})"
-
-    # Only show edge and EV when we have real sportsbook odds
-    edge_str = ""
-    if has_real_odds and pick.edge is not None and pick.edge >= 0.01:
-        edge_str = f"  |  **{pick.edge:.0%} edge**"
-
-    ev_str = ""
-    if has_real_odds:
-        ev = pick.ev_per_unit
-        if ev is not None:
-            if ev > 0:
-                ev_str = f"  |  **EV: +${ev:.2f}/u**"
-            else:
-                ev_str = f"  |  EV: ${ev:.2f}/u"
 
     lines = [
         f"### {home_display}  vs  {away_display}",
         f"### Kickoff: <t:{ts}:t>  (<t:{ts}:R>)",
         "",
-        f"## {pick.market.upper()}  —  {units}{odds_str}",
+        f"## {pick.market.upper()}  —  {pick.units_display}",
         "",
-        f"**{top_rate:.0%}** hit rate  ({total_hits}/{total_sample}){edge_str}{ev_str}",
+        f"**{top_rate:.0%}** hit rate",
     ]
-
-    if pick.is_heavy_juice:
-        lines.append("⚠️ Heavy juice — low payout")
-
-    # Show match context: avg goals + offered lines
-    context_parts = []
-    if report.avg_goals is not None:
-        context_parts.append(f"Matchup avg: **{report.avg_goals:.1f}** goals")
-    if match.odds and match.odds.total_lines:
-        offered = ", ".join(str(ol.line) for ol in match.odds.total_lines)
-        context_parts.append(f"Lines offered: {offered}")
-    elif not pick.odds_line:
-        context_parts.append("No book odds available")
-    # External data source labels
-    src_types = {t.trend_type for t in pick.supporting_trends}
-    ext_labels = []
-    if "tc_player" in src_types:
-        ext_labels.append("TotalCorner")
-    if "forebet" in src_types:
-        ext_labels.append("Forebet")
-    if ext_labels:
-        context_parts.append(f"+ {', '.join(ext_labels)}")
-
-    if context_parts:
-        lines.append("\n" + "  |  ".join(context_parts))
 
     color = _confidence_color(top_rate)
 
-    embed = {
+    return {
         "title": league_name,
         "description": "\n".join(lines),
         "color": color,
     }
-
-    return embed
 
 
 # ── Senders ──────────────────────────────────────────────────────
