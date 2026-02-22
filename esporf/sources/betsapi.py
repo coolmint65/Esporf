@@ -250,6 +250,9 @@ class BetsAPIClient:
         except Exception as e:
             logger.warning("Inplay fetch failed for league %d: %s", league_id, e)
 
+        # Drop events that actually belong to a different league
+        all_matches = [m for m in all_matches if m.league_id == league_id]
+
         # Sort by start time
         all_matches.sort(key=lambda m: m.start_time)
         return all_matches
@@ -363,9 +366,15 @@ class BetsAPIClient:
         # a Volta query).
         actual_league_id = league_id
         event_league = event.get("league", {})
-        if event_league:
+        if isinstance(event_league, dict) and event_league:
             try:
                 actual_league_id = int(event_league.get("id", league_id))
+            except (ValueError, TypeError):
+                pass
+        # Also handle flat league_id field
+        elif "league_id" in event:
+            try:
+                actual_league_id = int(event["league_id"])
             except (ValueError, TypeError):
                 pass
         return UpcomingMatch(
@@ -383,6 +392,10 @@ class BetsAPIClient:
         BetsAPI uses ``over_od``/``under_od`` for O/U markets (not home/away).
         The handicap can be a compound Asian total like "3.5,4.0" — we split
         those into individual lines so each can be matched to trend data.
+
+        Only standard .5 lines are kept (e.g. 2.5, 3.5, 4.5). Asian quarter
+        lines (.25, .75) and whole numbers are dropped since most sportsbooks
+        don't offer them.
         """
         results: list[OddsLine] = []
         try:
@@ -398,7 +411,8 @@ class BetsAPIClient:
                 if not part:
                     continue
                 line = float(part)
-                if line > 0:
+                # Only keep standard .5 lines (skip .25, .75, whole numbers)
+                if line > 0 and round(line % 1, 2) == 0.5:
                     results.append(OddsLine(line=line, over_odds=over, under_odds=under))
         except (ValueError, TypeError):
             pass
