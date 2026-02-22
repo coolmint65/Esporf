@@ -37,6 +37,7 @@ class Settings(BaseSettings):
 
     # Alerts
     discord_webhook_url: str = ""
+    discord_role_id: str = ""  # Role ID to mention in alerts (e.g. "eSoccer" role)
 
     # Data persistence
     data_dir: str = "data"

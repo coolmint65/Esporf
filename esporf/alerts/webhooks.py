@@ -86,7 +86,9 @@ async def send_discord_alert(reports: list[MatchupReport]) -> None:
         embed = _build_discord_embed(report)
         if not embed:
             continue
-        payload = {"embeds": [embed]}
+        payload: dict = {"embeds": [embed]}
+        if settings.discord_role_id:
+            payload["content"] = f"<@&{settings.discord_role_id}>"
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(url, json=payload)
