@@ -45,6 +45,8 @@ def _build_discord_embed(report: MatchupReport) -> dict:
     ts = match.start_time
 
     top_rate = max(t.hit_rate for t in pick.supporting_trends)
+    total_hits = sum(t.hits for t in pick.supporting_trends)
+    total_sample = sum(t.sample_size for t in pick.supporting_trends)
 
     home_handle = extract_handle(match.home)
     away_handle = extract_handle(match.away)
@@ -57,7 +59,7 @@ def _build_discord_embed(report: MatchupReport) -> dict:
         "",
         f"## {pick.market.upper()}  —  {pick.units_display}",
         "",
-        f"**{top_rate:.0%}** hit rate",
+        f"**{top_rate:.0%}** hit rate  ({total_hits}/{total_sample})",
     ]
 
     color = _confidence_color(top_rate)
