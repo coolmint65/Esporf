@@ -242,6 +242,11 @@ class EsporfBot:
                     len(cross_ref_dupes), len(cross_ref_dupes),
                 )
 
+        # Drop matches that don't belong to a tracked league (BetsAPI can
+        # return neighbouring-league events, e.g. GT Leagues under Volta)
+        tracked = set(settings.tracked_league_ids)
+        all_upcoming = [m for m in all_upcoming if m.league_id in tracked]
+
         # Keep matches starting within lookahead window
         lookahead = settings.schedule_lookahead
         imminent = [m for m in all_upcoming if m.starts_within(lookahead)]

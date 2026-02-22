@@ -358,9 +358,19 @@ class BetsAPIClient:
     def _parse_upcoming(event: dict, league_id: int) -> UpcomingMatch:
         home_info = event.get("home", {})
         away_info = event.get("away", {})
+        # Use the event's actual league ID when available — BetsAPI may
+        # return matches from neighbouring leagues (e.g. GT Leagues under
+        # a Volta query).
+        actual_league_id = league_id
+        event_league = event.get("league", {})
+        if event_league:
+            try:
+                actual_league_id = int(event_league.get("id", league_id))
+            except (ValueError, TypeError):
+                pass
         return UpcomingMatch(
             match_id=str(event.get("id", "")),
-            league_id=league_id,
+            league_id=actual_league_id,
             home=home_info.get("name", "Unknown"),
             away=away_info.get("name", "Unknown"),
             start_time=int(event.get("time", 0)),
