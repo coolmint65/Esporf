@@ -111,11 +111,8 @@ def display_matchup_report(report: MatchupReport) -> None:
     if context_parts:
         body += f"\n[dim]{' | '.join(context_parts)}[/dim]"
 
-    home = extract_handle(match.home)
-    away = extract_handle(match.away)
-    # Use full team names if available for easier sportsbook matching
-    home_display = match.home if home != match.home else home
-    away_display = match.away if away != match.away else away
+    home_display = extract_handle(match.home)
+    away_display = extract_handle(match.away)
 
     title = (
         f"[bold]{home_display}[/] vs [bold]{away_display}[/]  "

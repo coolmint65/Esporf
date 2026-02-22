@@ -48,10 +48,8 @@ def _build_discord_embed(report: MatchupReport) -> dict:
     total_hits = sum(t.hits for t in pick.supporting_trends)
     total_sample = sum(t.sample_size for t in pick.supporting_trends)
 
-    home_handle = extract_handle(match.home)
-    away_handle = extract_handle(match.away)
-    home_display = match.home if home_handle != match.home else home_handle
-    away_display = match.away if away_handle != match.away else away_handle
+    home_display = extract_handle(match.home)
+    away_display = extract_handle(match.away)
 
     lines = [
         f"### {home_display}  vs  {away_display}",
