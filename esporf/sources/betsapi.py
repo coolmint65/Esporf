@@ -308,8 +308,9 @@ class BetsAPIClient:
         """
         for match in matches:
             try:
-                match.odds = await self.get_event_odds(match.match_id)
-                if match.odds.has_data:
+                new_odds = await self.get_event_odds(match.match_id)
+                if new_odds.has_data:
+                    match.odds = new_odds
                     lines = match.odds.available_lines
                     logger.info(
                         "Odds for %s: lines=%s", match.display_name, lines

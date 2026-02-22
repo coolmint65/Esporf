@@ -189,6 +189,59 @@ class EsporfBot:
             except Exception as e:
                 logger.warning("BetsAPI schedule failed for league %d: %s", lid, e)
 
+        # Fuzzy cross-reference pass: AceOdds timestamps come from "HH:MM"
+        # text (always second-aligned to :00), while BetsAPI timestamps may
+        # differ by up to a few minutes.  Exact key matching misses these,
+        # leaving ace_ matches without a BetsAPI ID (and therefore no odds).
+        # Match by player pair + approximate time (within 5 min) to fix this.
+        still_unresolved = [
+            (i, m) for i, m in enumerate(all_upcoming)
+            if m.match_id.startswith(("esb_", "ace_"))
+        ]
+        if still_unresolved:
+            betsapi_lookup: dict[tuple[str, str], list[tuple[int, UpcomingMatch]]] = {}
+            for i, m in enumerate(all_upcoming):
+                if m.match_id.startswith(("esb_", "ace_")):
+                    continue
+                h = extract_handle(m.home)
+                a = extract_handle(m.away)
+                pair = tuple(sorted([h, a]))
+                betsapi_lookup.setdefault(pair, []).append((i, m))
+
+            cross_ref_dupes: set[int] = set()
+            for idx, m in still_unresolved:
+                h = extract_handle(m.home)
+                a = extract_handle(m.away)
+                pair = tuple(sorted([h, a]))
+                best_candidate = None
+                best_delta = 301  # exceeds 300s threshold
+                best_bets_idx = -1
+                for bets_idx, candidate in betsapi_lookup.get(pair, []):
+                    if bets_idx in cross_ref_dupes:
+                        continue
+                    delta = abs(candidate.start_time - m.start_time)
+                    if delta <= 300 and delta < best_delta:
+                        best_candidate = candidate
+                        best_delta = delta
+                        best_bets_idx = bets_idx
+                if best_candidate is not None:
+                    m.match_id = best_candidate.match_id
+                    cross_ref_dupes.add(best_bets_idx)
+                    logger.debug(
+                        "Fuzzy cross-ref %s vs %s → BetsAPI %s (Δ%ds)",
+                        m.home, m.away, best_candidate.match_id, best_delta,
+                    )
+
+            if cross_ref_dupes:
+                all_upcoming = [
+                    m for i, m in enumerate(all_upcoming)
+                    if i not in cross_ref_dupes
+                ]
+                logger.info(
+                    "Fuzzy cross-ref resolved %d match(es), removed %d duplicate(s)",
+                    len(cross_ref_dupes), len(cross_ref_dupes),
+                )
+
         # Keep matches starting within lookahead window
         lookahead = settings.schedule_lookahead
         imminent = [m for m in all_upcoming if m.starts_within(lookahead)]
