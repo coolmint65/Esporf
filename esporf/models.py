@@ -462,11 +462,13 @@ class MatchupReport:
             market_groups.setdefault(t.category, []).append(t)
 
         if has_real_odds:
-            pick = self._best_bet_with_odds(market_groups, odds)
-            if pick is not None:
-                return pick
-            # Fall back to estimated scoring if no book lines had positive edge
-        return self._best_bet_estimated(market_groups)
+            return self._best_bet_with_odds(market_groups, odds)
+
+        # No real sportsbook odds — don't guess. Without knowing what lines
+        # the book is actually offering and at what price, any recommendation
+        # is a shot in the dark. A 100% hit rate on O2.5 means nothing if
+        # the book isn't even offering that line.
+        return None
 
     def _best_bet_with_odds(
         self,
@@ -602,92 +604,6 @@ class MatchupReport:
             edge=best_edge,
         )
 
-    def _best_bet_estimated(
-        self, market_groups: dict[str, list[Trend]]
-    ) -> BetPick | None:
-        """Fallback: pick the best bet using per-match implied probabilities.
-
-        Uses match-specific avg_goals (Poisson model) when available to
-        estimate what the sportsbook would price each line at. Lines where
-        the implied probability exceeds 55% are filtered out — without real
-        odds we can't verify the price, so we avoid recommending bets that
-        are likely to be heavily juiced.
-
-        Both overs and unders compete on equal footing — if Under 4.5 has
-        a higher edge than Over 3.5 for this matchup, the under wins.
-        """
-        max_implied = 0.55
-        filtered: dict[str, list[Trend]] = {}
-        for market, trends in market_groups.items():
-            implied = _match_implied_probability(market, self.avg_goals)
-            if implied is not None and implied > max_implied:
-                continue
-            filtered[market] = trends
-
-        if not filtered:
-            filtered = market_groups
-
-        best_market: str | None = None
-        best_score = 0.0
-        best_trends: list[Trend] = []
-        best_edge: float = 0.0
-
-        for market, trends in filtered.items():
-            agreement = len(trends)
-            avg_rate = sum(t.hit_rate for t in trends) / agreement
-            avg_sample = sum(t.sample_size for t in trends) / agreement
-
-            # Per-match implied probability (Poisson when avg_goals known)
-            implied = _match_implied_probability(market, self.avg_goals)
-            if implied is not None:
-                edge = max(avg_rate - implied, 0.0)
-                edge_norm = min(edge / 0.30, 1.0)  # 30%+ edge → perfect
-            else:
-                edge = 0.0
-                edge_norm = 0.5  # neutral for non-line markets
-
-            # Score: 40% hit rate, 25% agreement, 15% sample, 20% edge
-            score = (
-                avg_rate * 0.40
-                + min(agreement / 5, 1.0) * 0.25
-                + min(avg_sample / 20, 1.0) * 0.15
-                + edge_norm * 0.20
-            )
-            if score > best_score:
-                best_score = score
-                best_market = market
-                best_trends = trends
-                best_edge = edge
-
-        if best_market is None:
-            return None
-
-        sources = ", ".join(sorted({_trend_source_label(t.trend_type) for t in best_trends}))
-        top_rate = max(t.hit_rate for t in best_trends)
-
-        # Include avg goals context and edge in the reason
-        avg_ctx = ""
-        if self.avg_goals is not None:
-            avg_ctx = f", matchup avg {self.avg_goals:.1f} goals"
-
-        edge_ctx = ""
-        if best_edge > 0:
-            edge_ctx = f", {best_edge:.0%} est. edge"
-
-        reason = (
-            f"{best_market} backed by {len(best_trends)} trend(s) "
-            f"({sources}) — top hit rate {top_rate:.0%}{edge_ctx}{avg_ctx}"
-        )
-
-        return BetPick(
-            market=best_market,
-            confidence=best_score,
-            supporting_trends=best_trends,
-            reason=reason,
-            edge=best_edge if best_edge > 0 else None,
-        )
-
-
 def _trend_source_label(trend_type: str) -> str:
     return {
         "h2h": "H2H",
@@ -727,58 +643,6 @@ def _poisson_over_prob(avg_goals: float, line: float) -> float:
     for k in range(k_max + 1):
         cdf += (avg_goals ** k) * math.exp(-avg_goals) / math.factorial(k)
     return max(0.0, min(1.0, 1.0 - cdf))
-
-
-def _match_implied_probability(
-    market: str, avg_goals: float | None
-) -> float | None:
-    """Estimate the implied probability for a line using match-specific data.
-
-    When avg_goals is available, uses Poisson distribution to compute
-    the probability for this specific matchup. Falls back to a generic
-    table when no match data exists.
-
-    Returns None for non-line markets (Win, Draw, etc.).
-    """
-    parsed = _parse_line(market)
-    if parsed is None:
-        return None
-
-    direction, line = parsed
-
-    if avg_goals is not None:
-        over_prob = _poisson_over_prob(avg_goals, line)
-        if direction.lower() == "over":
-            return over_prob
-        else:
-            return 1.0 - over_prob
-
-    # Fallback: generic Volta averages (~5 total goals)
-    return _estimate_implied_probability_generic(market)
-
-
-def _estimate_implied_probability_generic(market: str) -> float | None:
-    """Generic implied probability table for Volta (6-min, ~5 goal avg).
-
-    Used only when no match-specific data is available.
-    """
-    parsed = _parse_line(market)
-    if parsed is None:
-        return None
-
-    direction, line = parsed
-
-    under_implied = {
-        2.5: 0.22, 3.5: 0.38, 4.5: 0.58,
-        5.5: 0.75, 6.5: 0.88, 7.5: 0.95,
-    }
-    over_implied = {
-        2.5: 0.85, 3.5: 0.72, 4.5: 0.52,
-        5.5: 0.30, 6.5: 0.15, 7.5: 0.05,
-    }
-
-    table = under_implied if direction.lower() == "under" else over_implied
-    return table.get(line)
 
 
 def _get_moneyline_implied(

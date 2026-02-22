@@ -1,4 +1,4 @@
-"""Webhook-based alert delivery for trend signals (Discord, Telegram)."""
+"""Webhook-based alert delivery for trend signals (Discord)."""
 
 from __future__ import annotations
 
@@ -31,12 +31,6 @@ def _confidence_color(confidence: float) -> int:
         if confidence >= threshold:
             return color
     return 0x95A5A6
-
-
-def _kickoff_est(ts: int) -> str:
-    """Format a unix timestamp as '9:25 PM EST'."""
-    dt = datetime.fromtimestamp(ts, tz=_EST)
-    return dt.strftime("%-I:%M %p EST")
 
 
 def _build_discord_embed(report: MatchupReport) -> dict:
@@ -145,87 +139,11 @@ async def send_discord_alert(reports: list[MatchupReport]) -> None:
             logger.warning("Failed to send Discord alert: %s", e)
 
 
-async def send_telegram_alert(reports: list[MatchupReport]) -> None:
-    """Send trend alerts to a Telegram chat."""
-    token = settings.telegram_bot_token
-    chat_id = settings.telegram_chat_id
-    if not token or not chat_id:
-        return
-
-    api_url = f"https://api.telegram.org/bot{token}/sendMessage"
-
-    for report in reports:
-        if not report.has_trends:
-            continue
-        match = report.match
-        pick = report.best_bet
-        if not pick:
-            continue
-        market = pick.market.upper()
-        units = pick.units_display
-        minutes = match.minutes_until
-        time_str = _kickoff_est(match.start_time)
-        time_detail = f"{time_str} ({minutes} min)" if minutes > 0 else f"{time_str} (LIVE)"
-
-        top_rate = max(t.hit_rate for t in pick.supporting_trends)
-        total_hits = sum(t.hits for t in pick.supporting_trends)
-        total_sample = sum(t.sample_size for t in pick.supporting_trends)
-
-        home_handle = extract_handle(match.home)
-        away_handle = extract_handle(match.away)
-        home_display = match.home if home_handle != match.home else home_handle
-        away_display = match.away if away_handle != match.away else away_handle
-
-        # Add odds if available
-        has_real_odds = pick.odds_line is not None
-        odds_str = ""
-        if pick.american_odds:
-            odds_str = f" ({pick.american_odds})"
-
-        # Only show edge and EV with real sportsbook odds
-        edge_str = ""
-        if has_real_odds and pick.edge is not None and pick.edge >= 0.01:
-            edge_str = f" | {pick.edge:.0%} edge"
-
-        ev_str = ""
-        if has_real_odds:
-            ev = pick.ev_per_unit
-            if ev is not None and ev > 0:
-                ev_str = f" | EV: +${ev:.2f}/u"
-
-        avg_str = ""
-        if report.avg_goals is not None:
-            avg_str = f" | Avg: {report.avg_goals:.1f} goals"
-
-        lines = [
-            f"<b>{home_display} vs {away_display}</b>",
-            f"<b>{market}{odds_str} — {units}</b>",
-            time_detail,
-            f"History: {total_hits}/{total_sample} ({top_rate:.0%}){edge_str}{ev_str}{avg_str}",
-        ]
-        if pick.is_heavy_juice:
-            lines.append("⚠️ Heavy juice — low payout")
-
-        msg = "\n".join(lines)
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(
-                    api_url,
-                    json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"},
-                )
-                resp.raise_for_status()
-                logger.info("Telegram alert sent for %s", match.display_name)
-        except Exception as e:
-            logger.warning("Failed to send Telegram alert: %s", e)
-
-
 async def send_alerts(reports: list[MatchupReport]) -> None:
-    """Send alerts through all configured channels."""
+    """Send alerts through Discord."""
     reports_with_trends = [r for r in reports if r.has_trends]
     if not reports_with_trends:
         return
 
     if settings.discord_webhook_url:
         await send_discord_alert(reports_with_trends)
-    if settings.telegram_bot_token:
-        await send_telegram_alert(reports_with_trends)

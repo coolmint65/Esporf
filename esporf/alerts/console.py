@@ -28,12 +28,14 @@ def display_matchup_report(report: MatchupReport) -> None:
     kickoff = _kickoff_est(match.start_time)
     minutes = match.minutes_until
 
-    if not report.has_trends:
-        console.print(f"  [dim]{kickoff}  {match.display_name} — no pick[/dim]")
-        return
-
     pick = report.best_bet
     if not pick:
+        # No pick: either no trends or no real sportsbook odds
+        has_odds = match.odds and match.odds.has_data
+        if not has_odds and report.has_trends:
+            console.print(f"  [dim]{kickoff}  {match.display_name} — no book odds[/dim]")
+        else:
+            console.print(f"  [dim]{kickoff}  {match.display_name} — no pick[/dim]")
         return
 
     # Top-line history stat

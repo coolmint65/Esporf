@@ -37,8 +37,6 @@ class Settings(BaseSettings):
 
     # Alerts
     discord_webhook_url: str = ""
-    telegram_bot_token: str = ""
-    telegram_chat_id: str = ""
 
     # Data persistence
     data_dir: str = "data"

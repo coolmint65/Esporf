@@ -206,22 +206,29 @@ class EsporfBot:
             reports.append(report)
 
         # Display results
-        reports_with_trends = [r for r in reports if r.has_trends]
-        total_trends = sum(len(r.trends) for r in reports_with_trends)
+        reports_with_picks = [r for r in reports if r.best_bet is not None]
+        reports_no_odds = [
+            r for r in reports
+            if r.has_trends and r.best_bet is None
+        ]
 
         display_scan_summary(
             total_matches=len(all_upcoming),
-            matches_with_trends=len(reports_with_trends),
-            total_trends=total_trends,
+            matches_with_trends=len(reports_with_picks),
+            total_trends=sum(len(r.trends) for r in reports_with_picks),
             db_total=self.db.total_matches(),
         )
+        if reports_no_odds:
+            console.print(
+                f"  [dim]{len(reports_no_odds)} match(es) have trends but no book odds[/dim]"
+            )
 
         for report in reports:
             display_matchup_report(report)
 
-        # Send webhook alerts for new matchups only (avoid spamming same matchup)
+        # Send webhook alerts only for matches with real picks (actual odds)
         new_reports = [
-            r for r in reports_with_trends
+            r for r in reports_with_picks
             if r.match.match_id not in self._alerted_match_ids
         ]
         if new_reports:
@@ -229,7 +236,7 @@ class EsporfBot:
             for r in new_reports:
                 self._alerted_match_ids.add(r.match.match_id)
 
-        return reports_with_trends
+        return reports_with_picks
 
     async def run(self) -> None:
         """Run the bot in a continuous polling loop."""
