@@ -1,0 +1,18 @@
+[Unit]
+Description=Esporf Esports Trend Bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/esporf
+ExecStart=/opt/esporf/.venv/bin/esporf run
+Restart=always
+RestartSec=10
+User=esporf
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
