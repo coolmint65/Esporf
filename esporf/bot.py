@@ -114,6 +114,7 @@ class EsporfBot:
         # 1. Long-range: AceOdds (full day schedule, 7+ hours ahead)
         all_upcoming: list[UpcomingMatch] = []
         seen_keys: set[str] = set()
+        key_to_idx: dict[str, int] = {}  # key → index in all_upcoming
 
         try:
             ace_matches = await self.ace.get_volta_schedule()
@@ -121,6 +122,7 @@ class EsporfBot:
                 key = _match_key(m)
                 if key not in seen_keys:
                     seen_keys.add(key)
+                    key_to_idx[key] = len(all_upcoming)
                     all_upcoming.append(m)
         except Exception as e:
             logger.warning("AceOdds schedule failed: %s", e)
@@ -132,19 +134,34 @@ class EsporfBot:
                 key = _match_key(m)
                 if key not in seen_keys:
                     seen_keys.add(key)
+                    key_to_idx[key] = len(all_upcoming)
                     all_upcoming.append(m)
         except Exception as e:
             logger.warning("ESportsBattle schedule failed: %s", e)
 
         # 3. Supplementary: BetsAPI (other leagues + real-time)
+        # When a BetsAPI match duplicates an AceOdds/ESB match, swap in the
+        # BetsAPI match_id so we can fetch real odds for it later.
         for lid in settings.tracked_league_ids:
             try:
                 schedule = await self.api.get_full_schedule(lid)
                 for m in schedule:
                     key = _match_key(m)
                     if key not in seen_keys:
+                        # Brand new match only from BetsAPI
                         seen_keys.add(key)
+                        key_to_idx[key] = len(all_upcoming)
                         all_upcoming.append(m)
+                    elif key in key_to_idx:
+                        # Match already exists from AceOdds/ESB — cross-reference
+                        # the BetsAPI match_id so we can fetch real odds
+                        existing = all_upcoming[key_to_idx[key]]
+                        if existing.match_id.startswith(("esb_", "ace_")):
+                            existing.match_id = m.match_id
+                            logger.debug(
+                                "Cross-referenced %s vs %s with BetsAPI ID %s",
+                                m.home, m.away, m.match_id,
+                            )
             except Exception as e:
                 logger.warning("BetsAPI schedule failed for league %d: %s", lid, e)
 

@@ -49,28 +49,15 @@ class TrendAnalyzer:
         if match.odds and match.odds.has_data:
             # Real odds — only analyze lines the sportsbook is actually offering
             check_lines = sorted(match.odds.available_lines)
-        elif avg_goals is not None:
-            # No real odds — estimate which lines the book would offer using
-            # the matchup average. A book typically offers lines where neither
-            # side is a >85% favorite (Poisson-estimated).
-            candidate_lines = sorted(
-                set(self.goal_lines)
-                | {2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5}
-            )
-            check_lines = [
-                line for line in candidate_lines
-                if 0.10 <= _poisson_over_prob(avg_goals, line) <= 0.90
-            ]
-            if not check_lines:
-                # Fallback if Poisson filtering is too aggressive
-                check_lines = sorted(self.goal_lines)
-            logger.debug(
-                "Matchup avg %.1f goals → estimated lines: %s",
-                avg_goals, check_lines,
-            )
         else:
-            # No match data at all — use configured defaults
-            check_lines = sorted(self.goal_lines)
+            # No real odds — use the realistic lines the book actually offers
+            # for Volta (typically 2.5, 3.5, 4.5). Avoids phantom lines like
+            # 6.5 or 7.5 that look great statistically but can't be bet.
+            check_lines = sorted(settings.volta_book_line_values)
+            logger.debug(
+                "No real odds for %s vs %s — using default book lines: %s",
+                match.home, match.away, check_lines,
+            )
 
         trends: list[Trend] = []
 

@@ -307,10 +307,72 @@ class BetPick:
         return "Low"
 
     @property
+    def decimal_odds(self) -> float | None:
+        """The decimal odds for this pick's market, if real odds are attached."""
+        if not self.odds_line:
+            return None
+        parsed = _parse_line(self.market)
+        if not parsed:
+            return None
+        direction = parsed[0]
+        if direction.lower() == "over":
+            return self.odds_line.over_odds
+        return self.odds_line.under_odds
+
+    @property
+    def american_odds(self) -> str | None:
+        """The American odds string for this pick's market."""
+        if not self.odds_line:
+            return None
+        parsed = _parse_line(self.market)
+        if not parsed:
+            return None
+        direction = parsed[0]
+        if direction.lower() == "over":
+            return self.odds_line.over_american
+        return self.odds_line.under_american
+
+    @property
+    def ev_per_unit(self) -> float | None:
+        """Expected value per unit wagered using real sportsbook odds.
+
+        Formula: EV = (hit_rate × payout) - (1 - hit_rate)
+        where payout = decimal_odds - 1
+
+        Examples:
+          - O4.5 @ -240 (dec 1.417), 75% rate: EV = 0.75×0.417 - 0.25 = +0.063/u
+          - O3.5 @ +130 (dec 2.30),  70% rate: EV = 0.70×1.30  - 0.30 = +0.61/u
+        """
+        dec = self.decimal_odds
+        if dec is None or dec <= 1.0:
+            return None
+        avg_rate = sum(t.hit_rate for t in self.supporting_trends) / len(
+            self.supporting_trends
+        )
+        payout = dec - 1.0
+        return (avg_rate * payout) - (1.0 - avg_rate)
+
+    @property
+    def ev_display(self) -> str | None:
+        """Human-readable EV per unit, e.g. '+$0.61/u'."""
+        ev = self.ev_per_unit
+        if ev is None:
+            return None
+        return f"{'+' if ev >= 0 else ''}{ev:.2f}/u"
+
+    @property
+    def is_heavy_juice(self) -> bool:
+        """True if odds are -200 or worse (heavy favorite, low payout)."""
+        dec = self.decimal_odds
+        return dec is not None and dec < 1.50
+
+    @property
     def units(self) -> float:
-        """Recommended unit size based on confidence level.
+        """Recommended unit size based on confidence level and odds quality.
 
         Conservative by default — higher units reserved for the strongest edges.
+        Penalizes heavy juice (low payout) since even high hit rates produce
+        tiny profit.
         """
         n_sources = len(self.supporting_trends)
         top_rate = max(t.hit_rate for t in self.supporting_trends)
@@ -342,6 +404,15 @@ class BetPick:
         # Perfect storm: H2H backs it, 4+ sources, ALL above 85%
         if has_h2h and n_sources >= 4 and min_rate >= 0.85:
             u += 0.50
+
+        # Penalize heavy juice — cap units when payout is poor
+        if self.is_heavy_juice:
+            u = min(u, 1.25)
+
+        # Boost for positive EV at plus-money odds (getting a good price)
+        ev = self.ev_per_unit
+        if ev is not None and ev > 0.20:
+            u += 0.25
 
         # Snap DOWN to the nearest allowed tier (conservative)
         tiers = [1.0, 1.25, 1.5, 1.75, 2.0, 3.0]
@@ -402,7 +473,17 @@ class MatchupReport:
         market_groups: dict[str, list[Trend]],
         odds: MatchOdds,
     ) -> BetPick | None:
-        """Pick the best bet using real sportsbook odds for edge calculation."""
+        """Pick the best bet using real sportsbook odds for EV-based scoring.
+
+        Scoring is now EV-centric: we rank by expected value per unit wagered,
+        not just edge. A +130 line with 20% edge is far more valuable than
+        a -240 line with 10% edge.
+
+        Minimum 5% edge required — smaller edges get eaten by vig/variance.
+        Heavy juice (> -200) is penalized in scoring since the payout is poor.
+        """
+        MIN_EDGE = 0.05  # 5% minimum edge to recommend
+
         best_market: str | None = None
         best_score = 0.0
         best_trends: list[Trend] = []
@@ -424,20 +505,37 @@ class MatchupReport:
 
                 if direction.lower() == "over":
                     implied = odds_line.over_implied
+                    dec_odds = odds_line.over_odds
                 else:
                     implied = odds_line.under_implied
+                    dec_odds = odds_line.under_odds
 
                 edge = avg_rate - implied
-                if edge <= 0:
-                    continue  # no value — our hit rate doesn't beat the odds
+                if edge < MIN_EDGE:
+                    continue  # not enough edge to overcome vig/variance
 
-                # Score: 40% edge, 25% hit rate, 20% agreement, 15% sample
-                edge_norm = min(edge / 0.30, 1.0)  # 30%+ edge = perfect score
+                # EV per unit: (hit_rate × payout) - miss_rate
+                payout = dec_odds - 1.0
+                ev_per_unit = (avg_rate * payout) - (1.0 - avg_rate)
+
+                # Score: 35% EV quality, 25% edge, 20% agreement, 20% hit rate
+                # EV quality normalized: +0.50/u or more = perfect score
+                ev_norm = min(max(ev_per_unit, 0.0) / 0.50, 1.0)
+                edge_norm = min(edge / 0.30, 1.0)
+
+                # Penalize heavy juice — even with edge, payout is poor
+                juice_penalty = 0.0
+                if dec_odds < 1.50:  # worse than -200
+                    juice_penalty = 0.15
+                elif dec_odds < 1.67:  # worse than -150
+                    juice_penalty = 0.05
+
                 score = (
-                    edge_norm * 0.40
-                    + avg_rate * 0.25
+                    ev_norm * 0.35
+                    + edge_norm * 0.25
                     + min(agreement / 5, 1.0) * 0.20
-                    + min(avg_sample / 20, 1.0) * 0.15
+                    + avg_rate * 0.20
+                    - juice_penalty
                 )
                 if score > best_score:
                     best_score = score
@@ -455,14 +553,14 @@ class MatchupReport:
                 if implied is None:
                     continue
                 edge = avg_rate - implied
-                if edge <= 0:
+                if edge < MIN_EDGE:
                     continue
                 edge_norm = min(edge / 0.30, 1.0)
                 score = (
-                    edge_norm * 0.40
+                    edge_norm * 0.35
                     + avg_rate * 0.25
                     + min(agreement / 5, 1.0) * 0.20
-                    + min(avg_sample / 20, 1.0) * 0.15
+                    + min(avg_sample / 20, 1.0) * 0.20
                 )
                 if score > best_score:
                     best_score = score
@@ -511,12 +609,14 @@ class MatchupReport:
 
         Uses match-specific avg_goals (Poisson model) when available to
         estimate what the sportsbook would price each line at. Lines where
-        the implied probability exceeds 64% are filtered out (too expensive).
+        the implied probability exceeds 55% are filtered out — without real
+        odds we can't verify the price, so we avoid recommending bets that
+        are likely to be heavily juiced.
 
-        Both overs and unders compete on equal footing — if Under 6.5 has
-        a higher edge than Over 5.5 for this matchup, the under wins.
+        Both overs and unders compete on equal footing — if Under 4.5 has
+        a higher edge than Over 3.5 for this matchup, the under wins.
         """
-        max_implied = 0.64
+        max_implied = 0.55
         filtered: dict[str, list[Trend]] = {}
         for market, trends in market_groups.items():
             implied = _match_implied_probability(market, self.avg_goals)

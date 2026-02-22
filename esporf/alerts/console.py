@@ -51,26 +51,34 @@ def display_matchup_report(report: MatchupReport) -> None:
 
     units = pick.units_display
 
-    # Build body with actual odds when available
+    # Build body with actual odds and EV when available
+    has_real_odds = pick.odds_line is not None
     odds_str = ""
-    if pick.odds_line:
-        from esporf.models import _parse_line
+    if pick.american_odds:
+        odds_str = f"  [bold cyan]({pick.american_odds})[/]"
 
-        parsed = _parse_line(pick.market)
-        if parsed:
-            direction = parsed[0]
-            if direction.lower() == "over":
-                odds_str = f"  [bold cyan]({pick.odds_line.over_american})[/]"
-            else:
-                odds_str = f"  [bold cyan]({pick.odds_line.under_american})[/]"
-
+    # Only show edge and EV when we have real sportsbook odds
     edge_str = ""
-    if pick.edge is not None and pick.edge > 0:
+    if has_real_odds and pick.edge is not None and pick.edge >= 0.01:
         edge_str = f"  |  [bold green]{pick.edge:.0%} edge[/]"
+
+    ev_str = ""
+    if has_real_odds:
+        ev = pick.ev_per_unit
+        if ev is not None:
+            if ev > 0:
+                ev_str = f"  |  [bold green]EV: +${ev:.2f}/u[/]"
+            else:
+                ev_str = f"  |  [bold red]EV: ${ev:.2f}/u[/]"
+
+    juice_warn = ""
+    if pick.is_heavy_juice:
+        juice_warn = "\n[bold yellow]  ⚠ Heavy juice — low payout[/]"
 
     body = (
         f"[bold white]{pick.market.upper()}  —  {units}[/]{odds_str}\n"
-        f"[bold]{top_rate:.0%}[/] hit rate  ({total_hits}/{total_sample}){edge_str}"
+        f"[bold]{top_rate:.0%}[/] hit rate  ({total_hits}/{total_sample}){edge_str}{ev_str}"
+        f"{juice_warn}"
     )
 
     # Show match context: avg goals + available lines
@@ -80,6 +88,8 @@ def display_matchup_report(report: MatchupReport) -> None:
     if match.odds and match.odds.has_data:
         lines_display = "  ".join(f"{ol.line}" for ol in match.odds.total_lines)
         context_parts.append(f"Lines: {lines_display}")
+    elif not pick.odds_line:
+        context_parts.append("No book odds")
     if context_parts:
         body += f"\n[dim]{' | '.join(context_parts)}[/dim]"
 

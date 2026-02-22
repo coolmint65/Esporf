@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     # Over/under goal lines to check
     goal_lines: str = "2.5,3.5,4.5,5.5,6.5,7.5"
 
+    # Realistic lines the sportsbook actually offers for Volta
+    # Used as fallback when real odds aren't available
+    volta_book_lines: str = "2.5,3.5,4.5"
+
     # Alerts
     discord_webhook_url: str = ""
     telegram_bot_token: str = ""
@@ -52,6 +56,10 @@ class Settings(BaseSettings):
     @property
     def goal_line_values(self) -> list[float]:
         return [float(v.strip()) for v in self.goal_lines.split(",") if v.strip()]
+
+    @property
+    def volta_book_line_values(self) -> list[float]:
+        return [float(v.strip()) for v in self.volta_book_lines.split(",") if v.strip()]
 
 
 settings = Settings()

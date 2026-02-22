@@ -66,21 +66,24 @@ def _build_discord_embed(report: MatchupReport) -> dict:
     away_display = match.away if away_handle != match.away else away_handle
 
     # Build odds string if real odds are attached
+    has_real_odds = pick.odds_line is not None
     odds_str = ""
-    if pick.odds_line:
-        from esporf.models import _parse_line
+    if pick.american_odds:
+        odds_str = f"  ({pick.american_odds})"
 
-        parsed = _parse_line(pick.market)
-        if parsed:
-            direction = parsed[0]
-            if direction.lower() == "over":
-                odds_str = f"  ({pick.odds_line.over_american})"
-            else:
-                odds_str = f"  ({pick.odds_line.under_american})"
-
+    # Only show edge and EV when we have real sportsbook odds
     edge_str = ""
-    if pick.edge is not None and pick.edge > 0:
+    if has_real_odds and pick.edge is not None and pick.edge >= 0.01:
         edge_str = f"  |  **{pick.edge:.0%} edge**"
+
+    ev_str = ""
+    if has_real_odds:
+        ev = pick.ev_per_unit
+        if ev is not None:
+            if ev > 0:
+                ev_str = f"  |  **EV: +${ev:.2f}/u**"
+            else:
+                ev_str = f"  |  EV: ${ev:.2f}/u"
 
     lines = [
         f"### {home_display}  vs  {away_display}",
@@ -88,8 +91,11 @@ def _build_discord_embed(report: MatchupReport) -> dict:
         "",
         f"## {pick.market.upper()}  —  {units}{odds_str}",
         "",
-        f"**{top_rate:.0%}** hit rate  ({total_hits}/{total_sample}){edge_str}",
+        f"**{top_rate:.0%}** hit rate  ({total_hits}/{total_sample}){edge_str}{ev_str}",
     ]
+
+    if pick.is_heavy_juice:
+        lines.append("⚠️ Heavy juice — low payout")
 
     # Show match context: avg goals + offered lines
     context_parts = []
@@ -98,6 +104,8 @@ def _build_discord_embed(report: MatchupReport) -> dict:
     if match.odds and match.odds.total_lines:
         offered = ", ".join(str(ol.line) for ol in match.odds.total_lines)
         context_parts.append(f"Lines offered: {offered}")
+    elif not pick.odds_line:
+        context_parts.append("No book odds available")
     if context_parts:
         lines.append("\n" + "  |  ".join(context_parts))
 
@@ -169,21 +177,21 @@ async def send_telegram_alert(reports: list[MatchupReport]) -> None:
         away_display = match.away if away_handle != match.away else away_handle
 
         # Add odds if available
+        has_real_odds = pick.odds_line is not None
         odds_str = ""
-        if pick.odds_line:
-            from esporf.models import _parse_line
+        if pick.american_odds:
+            odds_str = f" ({pick.american_odds})"
 
-            parsed = _parse_line(pick.market)
-            if parsed:
-                direction = parsed[0]
-                if direction.lower() == "over":
-                    odds_str = f" ({pick.odds_line.over_american})"
-                else:
-                    odds_str = f" ({pick.odds_line.under_american})"
-
+        # Only show edge and EV with real sportsbook odds
         edge_str = ""
-        if pick.edge is not None and pick.edge > 0:
+        if has_real_odds and pick.edge is not None and pick.edge >= 0.01:
             edge_str = f" | {pick.edge:.0%} edge"
+
+        ev_str = ""
+        if has_real_odds:
+            ev = pick.ev_per_unit
+            if ev is not None and ev > 0:
+                ev_str = f" | EV: +${ev:.2f}/u"
 
         avg_str = ""
         if report.avg_goals is not None:
@@ -193,8 +201,10 @@ async def send_telegram_alert(reports: list[MatchupReport]) -> None:
             f"<b>{home_display} vs {away_display}</b>",
             f"<b>{market}{odds_str} — {units}</b>",
             time_detail,
-            f"History: {total_hits}/{total_sample} ({top_rate:.0%}){edge_str}{avg_str}",
+            f"History: {total_hits}/{total_sample} ({top_rate:.0%}){edge_str}{ev_str}{avg_str}",
         ]
+        if pick.is_heavy_juice:
+            lines.append("⚠️ Heavy juice — low payout")
 
         msg = "\n".join(lines)
         try:
