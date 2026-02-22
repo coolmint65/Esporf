@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -16,10 +17,14 @@ console = Console()
 
 _EST = ZoneInfo("US/Eastern")
 
+# Windows uses %#I for no-padding, Linux/macOS use %-I
+_TIME_FMT = "%#I:%M %p" if os.name == "nt" else "%-I:%M %p"
+_DT_FMT = "%m/%d %#I:%M%p" if os.name == "nt" else "%m/%d %-I:%M%p"
+
 
 def _kickoff_est(ts: int) -> str:
     dt = datetime.fromtimestamp(ts, tz=_EST)
-    return dt.strftime("%-I:%M %p")
+    return dt.strftime(_TIME_FMT)
 
 
 def display_matchup_report(report: MatchupReport) -> None:
@@ -147,7 +152,7 @@ def display_player_stats(player: str, matches: list) -> None:
     table.add_column("Away")
 
     for m in matches[:15]:
-        dt = datetime.fromtimestamp(m.start_time, tz=_EST).strftime("%m/%d %-I:%M%p")
+        dt = datetime.fromtimestamp(m.start_time, tz=_EST).strftime(_DT_FMT)
         home_style = "bold green" if m.winner == m.home else ""
         away_style = "bold green" if m.winner == m.away else ""
         table.add_row(
