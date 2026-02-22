@@ -100,6 +100,16 @@ def _build_discord_embed(report: MatchupReport) -> dict:
         context_parts.append(f"Lines offered: {offered}")
     elif not pick.odds_line:
         context_parts.append("No book odds available")
+    # External data source labels
+    src_types = {t.trend_type for t in pick.supporting_trends}
+    ext_labels = []
+    if "tc_player" in src_types:
+        ext_labels.append("TotalCorner")
+    if "forebet" in src_types:
+        ext_labels.append("Forebet")
+    if ext_labels:
+        context_parts.append(f"+ {', '.join(ext_labels)}")
+
     if context_parts:
         lines.append("\n" + "  |  ".join(context_parts))
 

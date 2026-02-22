@@ -4,8 +4,9 @@ Workflow:
 1. On first run, backfill match history from BetsAPI into SQLite
 2. Every cycle: fetch newly ended matches and add to DB
 3. Fetch upcoming matches from AceOdds (full day) + ESportsBattle (~30 min) + BetsAPI
-4. Run trend analysis on each matchup
-5. Display results and send webhook alerts for qualifying trends
+4. Fetch external stats from TotalCorner (per-player) + Forebet (predictions)
+5. Run trend analysis on each matchup (with external data when available)
+6. Display results and send webhook alerts for qualifying trends
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ from esporf.models import MatchupReport, UpcomingMatch, extract_handle
 from esporf.sources.aceodds import AceOddsClient
 from esporf.sources.betsapi import BetsAPIClient
 from esporf.sources.esportsbattle import ESportsBattleClient
+from esporf.sources.forebet import ForebetClient
+from esporf.sources.totalcorner import TotalCornerClient
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -47,6 +50,8 @@ class EsporfBot:
         self.api = BetsAPIClient()
         self.esb = ESportsBattleClient()
         self.ace = AceOddsClient()
+        self.tc = TotalCornerClient()
+        self.forebet = ForebetClient()
         self.db = MatchDatabase()
         self.analyzer = TrendAnalyzer(self.db)
         self._running = False
@@ -87,16 +92,36 @@ class EsporfBot:
             f"[bold green]Backfill complete: {self.db.total_matches():,} matches in DB[/bold green]\n"
         )
 
-    async def scan_once(self) -> list[MatchupReport]:
-        """Run a single scan cycle. Returns reports with qualifying trends.
+    async def _fetch_external_data(self) -> None:
+        """Pre-fetch TotalCorner and Forebet data for all tracked leagues.
 
-        Uses three schedule sources in priority order:
-        1. AceOdds — full day schedule (7+ hours ahead)
-        2. ESportsBattle — ~30 min lookahead (exact matchups, confirms timing)
-        3. BetsAPI — real-time + other leagues
-
-        Fetches real odds for BetsAPI-sourced matches.
+        Runs in parallel. Results are cached on each client instance.
         """
+        tasks = []
+        for lid in settings.tracked_league_ids:
+            if TotalCornerClient.supports_league(lid):
+                tasks.append(self.tc.get_league_stats(lid))
+        tasks.append(self.forebet.get_predictions())
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        tc_count = sum(
+            1 for r in results
+            if r is not None and not isinstance(r, (Exception, BaseException)) and hasattr(r, "players")
+        )
+        fb_result = results[-1] if results else None
+        fb_count = len(fb_result) if isinstance(fb_result, list) else 0
+
+        sources = []
+        if tc_count:
+            sources.append(f"TC: {tc_count} league(s)")
+        if fb_count:
+            sources.append(f"Forebet: {fb_count} pred(s)")
+        if sources:
+            console.print(f"  [dim]External: {', '.join(sources)}[/dim]")
+
+    async def scan_once(self) -> list[MatchupReport]:
+        """Run a single scan cycle. Returns reports with qualifying trends."""
         self._scan_count += 1
         timestamp = datetime.now().strftime("%H:%M:%S")
         console.print(f"\n[dim]── Scan #{self._scan_count} at {timestamp} ──[/dim]")
@@ -110,6 +135,9 @@ class EsporfBot:
                     logger.info("Added %d new results for league %d", added, lid)
             except Exception as e:
                 logger.warning("Failed to fetch ended matches for league %d: %s", lid, e)
+
+        # Fetch external data (TotalCorner + Forebet) in parallel
+        await self._fetch_external_data()
 
         # 1. Long-range: AceOdds (full day schedule, 7+ hours ahead)
         all_upcoming: list[UpcomingMatch] = []
@@ -140,21 +168,16 @@ class EsporfBot:
             logger.warning("ESportsBattle schedule failed: %s", e)
 
         # 3. Supplementary: BetsAPI (other leagues + real-time)
-        # When a BetsAPI match duplicates an AceOdds/ESB match, swap in the
-        # BetsAPI match_id so we can fetch real odds for it later.
         for lid in settings.tracked_league_ids:
             try:
                 schedule = await self.api.get_full_schedule(lid)
                 for m in schedule:
                     key = _match_key(m)
                     if key not in seen_keys:
-                        # Brand new match only from BetsAPI
                         seen_keys.add(key)
                         key_to_idx[key] = len(all_upcoming)
                         all_upcoming.append(m)
                     elif key in key_to_idx:
-                        # Match already exists from AceOdds/ESB — cross-reference
-                        # the BetsAPI match_id so we can fetch real odds
                         existing = all_upcoming[key_to_idx[key]]
                         if existing.match_id.startswith(("esb_", "ace_")):
                             existing.match_id = m.match_id
@@ -188,7 +211,6 @@ class EsporfBot:
         )
 
         # Fetch real odds for BetsAPI-sourced matches only
-        # (AceOdds/ESportsBattle IDs won't work with BetsAPI's odds endpoint)
         betsapi_matches = [
             m for m in all_upcoming
             if not m.match_id.startswith(("esb_", "ace_"))
@@ -199,10 +221,23 @@ class EsporfBot:
         if odds_count:
             console.print(f"  [dim]Got odds for {odds_count}/{len(all_upcoming)} matches[/dim]")
 
-        # Analyze each matchup for trends
+        # Get Forebet predictions (already cached from _fetch_external_data)
+        forebet_preds = await self.forebet.get_predictions()
+
+        # Analyze each matchup for trends (with external data)
         reports: list[MatchupReport] = []
         for match in all_upcoming:
-            report = self.analyzer.analyze_matchup(match)
+            # Get TotalCorner stats for this match's league
+            tc_stats = await self.tc.get_league_stats(match.league_id)
+
+            # Find matching Forebet prediction
+            forebet_pred = self.forebet.match_prediction(
+                match.home, match.away, forebet_preds
+            ) if forebet_preds else None
+
+            report = self.analyzer.analyze_matchup(
+                match, tc_stats=tc_stats, forebet_pred=forebet_pred
+            )
             reports.append(report)
 
         # Display results
@@ -243,12 +278,12 @@ class EsporfBot:
         self._running = True
         interval = settings.poll_interval
 
-        lookahead_h = settings.schedule_lookahead // 3600
         console.print(
             f"[bold blue]Esporf Trend Bot Starting[/bold blue]\n"
             f"  Tracking leagues: {settings.league_ids}\n"
             f"  Poll interval: {interval}s\n"
             f"  Schedule: [bold green]AceOdds[/bold green] + ESportsBattle + BetsAPI\n"
+            f"  External: [bold cyan]TotalCorner[/bold cyan] + Forebet\n"
             f"  Odds: BetsAPI v2\n"
             f"  Min hit rate: {settings.min_hit_rate:.0%}\n"
             f"  Min sample size: {settings.min_sample_size}\n"
@@ -279,6 +314,8 @@ class EsporfBot:
             await self.api.close()
             await self.esb.close()
             await self.ace.close()
+            await self.tc.close()
+            await self.forebet.close()
             self.db.close()
             console.print("\n[bold]Bot stopped.[/bold]")
 
@@ -301,4 +338,6 @@ async def scan_once() -> None:
         await bot.api.close()
         await bot.esb.close()
         await bot.ace.close()
+        await bot.tc.close()
+        await bot.forebet.close()
         bot.db.close()

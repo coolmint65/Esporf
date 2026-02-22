@@ -6,6 +6,10 @@ and returns those that meet the minimum hit rate threshold.
 Trend categories (full-time game lines only):
 - Over/Under X.5 total goals → Total Goals
 - Player win / draw / loss rate → Game Result (Moneyline)
+
+External data sources (when available):
+- TotalCorner: per-player Over X.5 hit rates + avg goals (trend_type "tc_player")
+- Forebet: match-level predicted totals (trend_type "forebet")
 """
 
 from __future__ import annotations
@@ -15,6 +19,8 @@ import logging
 from esporf.config import settings
 from esporf.database import MatchDatabase
 from esporf.models import MatchResult, MatchupReport, Trend, UpcomingMatch, _poisson_over_prob
+from esporf.sources.forebet import ForebetPrediction
+from esporf.sources.totalcorner import LeagueStats
 
 logger = logging.getLogger(__name__)
 
@@ -29,30 +35,29 @@ class TrendAnalyzer:
         self.last_n = settings.last_n_matches
         self.goal_lines = settings.goal_line_values
 
-    def analyze_matchup(self, match: UpcomingMatch) -> MatchupReport:
+    def analyze_matchup(
+        self,
+        match: UpcomingMatch,
+        tc_stats: LeagueStats | None = None,
+        forebet_pred: ForebetPrediction | None = None,
+    ) -> MatchupReport:
         """Run all trend checks for an upcoming match and return qualifying trends.
 
         Line selection is match-specific:
         1. When real odds are available → only analyze lines the book offers
-        2. When no odds → estimate which lines the book would offer based on
-           the matchup's average total goals (Poisson model)
+        2. When no odds → use default Volta book lines
 
-        This prevents recommending bets on lines the sportsbook doesn't carry
-        (e.g. Over 4.5 when the matchup averages 7 goals).
+        External data (TotalCorner, Forebet) adds independent trend signals
+        when available, boosting agreement and confidence scores.
         """
-        # Compute match-specific average total goals for smarter line selection
         avg_goals = self._compute_matchup_avg_goals(
-            match.home, match.away, match.league_id
+            match.home, match.away, match.league_id, tc_stats=tc_stats
         )
 
-        # Determine which goal lines to analyze based on what the book offers
+        # Determine which goal lines to analyze
         if match.odds and match.odds.has_data:
-            # Real odds — only analyze lines the sportsbook is actually offering
             check_lines = sorted(match.odds.available_lines)
         else:
-            # No real odds — use the realistic lines the book actually offers
-            # for Volta (typically 2.5, 3.5, 4.5). Avoids phantom lines like
-            # 6.5 or 7.5 that look great statistically but can't be bet.
             check_lines = sorted(settings.volta_book_line_values)
             logger.debug(
                 "No real odds for %s vs %s — using default book lines: %s",
@@ -75,6 +80,19 @@ class TrendAnalyzer:
 
         # 5. Away player AWAY-specific trends
         trends.extend(self._player_away_trends(match.away, match.league_id, check_lines))
+
+        # 6. TotalCorner per-player trends (external)
+        if tc_stats:
+            trends.extend(
+                self._tc_player_trends(match.home, tc_stats, match.league_id, check_lines)
+            )
+            trends.extend(
+                self._tc_player_trends(match.away, tc_stats, match.league_id, check_lines)
+            )
+
+        # 7. Forebet prediction cross-check (external)
+        if forebet_pred:
+            trends.extend(self._forebet_trends(forebet_pred, match.league_id, check_lines))
 
         # Sort by hit rate descending, then sample size descending
         trends.sort(key=lambda t: (t.hit_rate, t.sample_size), reverse=True)
@@ -229,19 +247,164 @@ class TrendAnalyzer:
 
         return [t for t in trends if t is not None]
 
+    # ── TotalCorner Trends (external) ────────────────────────────────
+
+    def _tc_player_trends(
+        self,
+        player: str,
+        tc_stats: LeagueStats,
+        league_id: int | None,
+        goal_lines: list[float],
+    ) -> list[Trend]:
+        """Create trend objects from TotalCorner's precomputed Over rates."""
+        ps = tc_stats.lookup(player)
+        if not ps or ps.matches_played < self.min_sample:
+            return []
+
+        trends: list[Trend] = []
+
+        for line in goal_lines:
+            rate = ps.over_rates.get(line)
+            if rate is not None and rate >= self.min_hit_rate:
+                hits = round(rate * ps.matches_played)
+                trends.append(Trend(
+                    category=f"Over {line} Goals",
+                    description=(
+                        f"{player} (TC {ps.matches_played} games) — "
+                        f"Over {line} in {hits}/{ps.matches_played} ({rate:.0%})"
+                    ),
+                    hits=hits,
+                    sample_size=ps.matches_played,
+                    hit_rate=rate,
+                    trend_type="tc_player",
+                    player_a=player,
+                    league_id=league_id,
+                    recent_results=[],
+                ))
+
+            # Under = 1 - Over for .5 lines
+            if rate is not None:
+                under_rate = 1.0 - rate
+                if under_rate >= self.min_hit_rate:
+                    under_hits = round(under_rate * ps.matches_played)
+                    trends.append(Trend(
+                        category=f"Under {line} Goals",
+                        description=(
+                            f"{player} (TC {ps.matches_played} games) — "
+                            f"Under {line} in {under_hits}/{ps.matches_played} ({under_rate:.0%})"
+                        ),
+                        hits=under_hits,
+                        sample_size=ps.matches_played,
+                        hit_rate=under_rate,
+                        trend_type="tc_player",
+                        player_a=player,
+                        league_id=league_id,
+                        recent_results=[],
+                    ))
+
+        # Win rate from TC
+        if ps.win_rate >= self.min_hit_rate:
+            trends.append(Trend(
+                category="Win",
+                description=(
+                    f"{player} (TC {ps.matches_played} games) — "
+                    f"Win rate {ps.wins}/{ps.matches_played} ({ps.win_rate:.0%})"
+                ),
+                hits=ps.wins,
+                sample_size=ps.matches_played,
+                hit_rate=ps.win_rate,
+                trend_type="tc_player",
+                player_a=player,
+                league_id=league_id,
+                recent_results=[],
+            ))
+
+        return trends
+
+    # ── Forebet Trends (external) ────────────────────────────────────
+
+    def _forebet_trends(
+        self,
+        pred: ForebetPrediction,
+        league_id: int | None,
+        goal_lines: list[float],
+    ) -> list[Trend]:
+        """Create trend signals from Forebet's predicted total goals.
+
+        Forebet predictions serve as a cross-check. When Forebet's predicted
+        total aligns with an Over/Under line, it adds one more source of
+        agreement to that market.
+        """
+        trends: list[Trend] = []
+        predicted_total = pred.avg_goals
+
+        for line in goal_lines:
+            if predicted_total > line:
+                # Forebet predicts over this line
+                # Use a synthetic hit rate based on how far above the line
+                margin = predicted_total - line
+                synthetic_rate = min(0.50 + margin * 0.10, 0.95)
+                if synthetic_rate >= self.min_hit_rate:
+                    trends.append(Trend(
+                        category=f"Over {line} Goals",
+                        description=(
+                            f"Forebet predicts {predicted_total:.1f} total goals — "
+                            f"Over {line}"
+                        ),
+                        hits=1,
+                        sample_size=1,
+                        hit_rate=synthetic_rate,
+                        trend_type="forebet",
+                        player_a=pred.home,
+                        player_b=pred.away,
+                        league_id=league_id,
+                        recent_results=[
+                            f"Pred: {pred.predicted_home_goals}-{pred.predicted_away_goals}"
+                        ],
+                    ))
+            elif predicted_total < line:
+                margin = line - predicted_total
+                synthetic_rate = min(0.50 + margin * 0.10, 0.95)
+                if synthetic_rate >= self.min_hit_rate:
+                    trends.append(Trend(
+                        category=f"Under {line} Goals",
+                        description=(
+                            f"Forebet predicts {predicted_total:.1f} total goals — "
+                            f"Under {line}"
+                        ),
+                        hits=1,
+                        sample_size=1,
+                        hit_rate=synthetic_rate,
+                        trend_type="forebet",
+                        player_a=pred.home,
+                        player_b=pred.away,
+                        league_id=league_id,
+                        recent_results=[
+                            f"Pred: {pred.predicted_home_goals}-{pred.predicted_away_goals}"
+                        ],
+                    ))
+
+        return trends
+
     # ── Match-specific statistics ────────────────────────────────────
 
     def _compute_matchup_avg_goals(
-        self, home: str, away: str, league_id: int | None
+        self,
+        home: str,
+        away: str,
+        league_id: int | None,
+        tc_stats: LeagueStats | None = None,
     ) -> float | None:
         """Compute expected total goals for this specific matchup.
 
         Uses a weighted average:
-        - H2H history (2× weight — most predictive of this exact matchup)
-        - Home player overall (1× weight)
-        - Away player overall (1× weight)
+        - H2H history (2x weight — most predictive of this exact matchup)
+        - Home player overall (1x weight)
+        - Away player overall (1x weight)
+        - TotalCorner matchup estimate (1.5x weight — larger sample, per-player data)
 
-        Returns None if no data is available at all.
+        The TC estimate uses each player's avg goals scored and opponent's
+        avg goals conceded to compute directional expected goals.
         """
         h2h = self.db.get_h2h_matches(home, away, limit=self.last_n)
         home_all = self.db.get_player_matches(home, limit=self.last_n, league_id=league_id)
@@ -261,6 +424,17 @@ class TrendAnalyzer:
             away_avg = sum(m.total_goals for m in away_all) / len(away_all)
             components.append((away_avg, 1.0))
 
+        # TotalCorner-based estimate: use per-player scoring/conceding rates
+        tc_avg = None
+        if tc_stats:
+            home_ps = tc_stats.lookup(home)
+            away_ps = tc_stats.lookup(away)
+            if home_ps and away_ps:
+                exp_home = (home_ps.avg_goals_scored + away_ps.avg_goals_conceded) / 2
+                exp_away = (away_ps.avg_goals_scored + home_ps.avg_goals_conceded) / 2
+                tc_avg = exp_home + exp_away
+                components.append((tc_avg, 1.5))
+
         if not components:
             return None
 
@@ -268,11 +442,12 @@ class TrendAnalyzer:
         avg = sum(v * w for v, w in components) / total_weight
 
         logger.debug(
-            "%s vs %s: avg_goals=%.1f (H2H=%s, home=%s, away=%s)",
+            "%s vs %s: avg_goals=%.1f (H2H=%s, home=%s, away=%s, TC=%s)",
             home, away, avg,
             f"{h2h_avg:.1f}" if h2h else "N/A",
             f"{home_avg:.1f}" if home_all else "N/A",
             f"{away_avg:.1f}" if away_all else "N/A",
+            f"{tc_avg:.1f}" if tc_avg else "N/A",
         )
         return avg
 

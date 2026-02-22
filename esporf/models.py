@@ -610,6 +610,8 @@ def _trend_source_label(trend_type: str) -> str:
         "player_overall": "Overall",
         "player_home": "Home form",
         "player_away": "Away form",
+        "tc_player": "TotalCorner",
+        "forebet": "Forebet",
     }.get(trend_type, trend_type)
 
 
