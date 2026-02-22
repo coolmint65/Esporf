@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import time
 from datetime import datetime
@@ -294,10 +295,11 @@ class EsporfBot:
         # Backfill history on startup
         await self.backfill()
 
-        # Set up signal handlers
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, self._shutdown)
+        # Set up signal handlers (add_signal_handler is not supported on Windows)
+        if os.name != "nt":
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, self._shutdown)
 
         try:
             while self._running:
