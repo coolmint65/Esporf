@@ -121,6 +121,9 @@ class EsporfDiscordBot(discord.Client):
 
         tracked = set(settings.tracked_league_ids)
 
+        # Sort by kick-off time so the soonest match alerts first
+        reports = sorted(reports, key=lambda r: r.match.start_time)
+
         for report in reports:
             if report.best_bet is None or report.match.league_id not in tracked:
                 continue
