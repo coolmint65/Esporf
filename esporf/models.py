@@ -434,10 +434,15 @@ class MatchupReport:
     trends: list[Trend]
     generated_at: float = field(default_factory=time.time)
     avg_goals: float | None = None  # match-specific expected total goals
+    # Goal-line trends detected at a lower threshold (55%) — used
+    # exclusively by best_trend_pick so that moderate-confidence
+    # lines (55-64%) can surface when the juice cap allows them.
+    # Normal trends (70%+) are in `trends` for everything else.
+    relaxed_trends: list[Trend] = field(default_factory=list)
 
     @property
     def has_trends(self) -> bool:
-        return len(self.trends) > 0
+        return len(self.trends) > 0 or len(self.relaxed_trends) > 0
 
     @property
     def best_bet(self) -> BetPick | None:
@@ -478,7 +483,9 @@ class MatchupReport:
         open your sportsbook and place the bet, but not so far that you
         get flooded with alerts for every match on the schedule.
         """
-        if not self.trends:
+        # Use relaxed trends (55%+) if available, fall back to normal
+        source = self.relaxed_trends or self.trends
+        if not source:
             return None
         # Don't generate trend-only pick if we already have a real odds pick
         if self.best_bet is not None:
@@ -491,7 +498,7 @@ class MatchupReport:
         book_lines = set(settings.volta_book_line_values)
 
         market_groups: dict[str, list[Trend]] = {}
-        for t in self.trends:
+        for t in source:
             market_groups.setdefault(t.category, []).append(t)
 
         return self._best_trend_only_pick(market_groups, book_lines)
@@ -512,10 +519,13 @@ class MatchupReport:
         Only considers lines the book typically offers (volta_book_lines).
         Requires at least the configured min_hit_rate to qualify.
         """
-        from esporf.config import settings
-        min_rate = settings.min_hit_rate
+        # Collect qualifying lines, then pick the tightest one.
+        # We use a LOWER hit rate floor (55%) than the main trend detector
+        # because the juice cap below is the real quality gate.  Individual
+        # trends are already ≥ min_hit_rate (70%) from the analyzer — this
+        # floor just catches edge cases.
+        TREND_ONLY_MIN_RATE = 0.55
 
-        # Collect qualifying lines, then pick the tightest one
         candidates: list[tuple[float, str, list[Trend]]] = []
 
         for market, trends in market_groups.items():
@@ -530,14 +540,14 @@ class MatchupReport:
             agreement = len(trends)
             avg_rate = sum(t.hit_rate for t in trends) / agreement
 
-            if avg_rate < min_rate:
+            if avg_rate < TREND_ONLY_MIN_RATE:
                 continue
 
             # Skip if implied fair odds are too juicy.  If our trend says
             # 75% hit rate the sportsbook will price it around -300 — no
-            # value laying that much juice.  Cap at -150 (decimal 1.667).
+            # value laying that much juice.  Cap at -180 (decimal 1.556).
             implied_dec = 1.0 / avg_rate if avg_rate > 0 else 999.0
-            if implied_dec < 1.667:  # worse than -150
+            if implied_dec < 1.556:  # worse than -180
                 continue
 
             # Must have multiple sources or strong sample to recommend

@@ -97,7 +97,32 @@ class TrendAnalyzer:
         # Sort by hit rate descending, then sample size descending
         trends.sort(key=lambda t: (t.hit_rate, t.sample_size), reverse=True)
 
-        return MatchupReport(match=match, trends=trends, avg_goals=avg_goals)
+        # Generate relaxed trends (55%+) for trend-only picks.
+        # These give best_trend_pick moderate-confidence candidates
+        # that can pass the juice cap (-180).  Only goal-line markets
+        # on volta book lines — win/draw trends don't need relaxing.
+        relaxed: list[Trend] = []
+        if not (match.odds and match.odds.has_data):
+            saved = self.min_hit_rate
+            self.min_hit_rate = 0.55
+            book_lines = sorted(settings.volta_book_line_values)
+            relaxed.extend(self._h2h_trends(match.home, match.away, match.league_id, book_lines))
+            relaxed.extend(self._player_overall_trends(match.home, match.league_id, book_lines))
+            relaxed.extend(self._player_overall_trends(match.away, match.league_id, book_lines))
+            relaxed.extend(self._player_home_trends(match.home, match.league_id, book_lines))
+            relaxed.extend(self._player_away_trends(match.away, match.league_id, book_lines))
+            if tc_stats:
+                relaxed.extend(self._tc_player_trends(match.home, tc_stats, match.league_id, book_lines))
+                relaxed.extend(self._tc_player_trends(match.away, tc_stats, match.league_id, book_lines))
+            self.min_hit_rate = saved
+            # Only keep goal-line trends (Over/Under X.X Goals)
+            relaxed = [t for t in relaxed if "Goals" in t.category]
+            relaxed.sort(key=lambda t: (t.hit_rate, t.sample_size), reverse=True)
+
+        return MatchupReport(
+            match=match, trends=trends, avg_goals=avg_goals,
+            relaxed_trends=relaxed,
+        )
 
     # ── Head-to-Head Trends ──────────────────────────────────────────
 
