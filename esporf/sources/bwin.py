@@ -73,6 +73,7 @@ class BwinClient:
         self._live_token: str = ""
         self._token_fetched_at: float = 0
         self._client: httpx.AsyncClient | None = None
+        self._gave_up: bool = False  # True after token extraction fails — stop retrying
 
         # Cache: list of (fixture_dict, MatchOdds) from last fetch
         self._odds_cache: list[tuple[dict, MatchOdds]] = []
@@ -170,14 +171,19 @@ class BwinClient:
         if self._odds_cache and (now - self._cache_time) < _ODDS_CACHE_TTL:
             return self._odds_cache
 
-        # Ensure we have a token
+        # Ensure we have a token — give up silently after first failure
+        if self._gave_up:
+            return []
+
         token = self._token
         if not token:
             acquired = await self.refresh_token()
             if not acquired:
+                self._gave_up = True
                 logger.warning(
-                    "bwin: no access token available — set BWIN_TOKEN in .env "
-                    "or check if bwin.com is reachable"
+                    "bwin: no access token available. Set BWIN_TOKEN in .env "
+                    "(open bwin.com in Chrome > F12 > Network > filter 'cds-api' "
+                    "> copy x-bwin-accessid value). Skipping bwin for this session."
                 )
                 return []
             token = self._token
@@ -204,8 +210,8 @@ class BwinClient:
                 f"{_CDS_BASE}/bettingoffer/fixtures",
                 params=params,
             )
-            if resp.status_code == 401 or resp.status_code == 403:
-                # Token expired — try to refresh
+            if resp.status_code in (401, 403):
+                # Token expired — try to refresh once, then give up
                 logger.info("bwin: token rejected (%d), refreshing", resp.status_code)
                 if await self.refresh_token():
                     params["x-bwin-accessid"] = self._token
@@ -214,6 +220,8 @@ class BwinClient:
                         params=params,
                     )
                 else:
+                    self._gave_up = True
+                    logger.warning("bwin: token refresh failed. Skipping bwin for this session.")
                     return []
 
             resp.raise_for_status()
