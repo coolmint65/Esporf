@@ -53,7 +53,7 @@ def _match_key(m: UpcomingMatch) -> str:
 class EsporfBot:
     """The main bot that collects data, finds trends, and sends alerts."""
 
-    def __init__(self):
+    def __init__(self, *, skip_webhook_alerts: bool = False):
         self.api = BetsAPIClient()
         self.esb = ESportsBattleClient()
         self.ace = AceOddsClient()
@@ -65,6 +65,7 @@ class EsporfBot:
         self._running = False
         self._scan_count = 0
         self._alerted_keys: set[str] = set()
+        self._skip_webhook_alerts = skip_webhook_alerts
 
     async def backfill(self) -> None:
         """Fetch historical match data to populate the database on first run.
@@ -475,14 +476,17 @@ class EsporfBot:
         # Uses the content-based _match_key (players + start_time) instead
         # of match_id, which can change between scans when BetsAPI
         # cross-references an ace_/esb_ match with a different numeric ID.
-        new_reports = [
-            r for r in reports_with_picks
-            if _match_key(r.match) not in self._alerted_keys
-        ]
-        if new_reports:
-            await send_alerts(new_reports)
-            for r in new_reports:
-                self._alerted_keys.add(_match_key(r.match))
+        # When running under the Discord bot, webhook alerts are skipped —
+        # the bot handles delivery via its own channel.send().
+        if not self._skip_webhook_alerts:
+            new_reports = [
+                r for r in reports_with_picks
+                if _match_key(r.match) not in self._alerted_keys
+            ]
+            if new_reports:
+                await send_alerts(new_reports)
+                for r in new_reports:
+                    self._alerted_keys.add(_match_key(r.match))
 
         return reports_with_picks
 

@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     discord_webhook_url: str = ""
     discord_role_id: str = ""  # Role ID to mention in alerts (e.g. "eSoccer" role)
 
+    # Discord bot (alternative to webhook alerts)
+    discord_bot_token: str = ""
+    discord_channel_id: str = ""  # Channel ID where bot sends alerts
+
     # Data persistence
     data_dir: str = "data"
     db_path: str = "data/esporf.db"

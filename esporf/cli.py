@@ -67,6 +67,11 @@ def main() -> None:
     # `esporf db` — database stats
     subparsers.add_parser("db", help="Show database statistics")
 
+    # `esporf discord` — run as a Discord bot
+    subparsers.add_parser(
+        "discord", help="Run as a Discord bot with slash commands"
+    )
+
     args = parser.parse_args()
     setup_logging(args.verbose)
 
@@ -99,6 +104,11 @@ def main() -> None:
 
     elif args.command == "db":
         _db_stats()
+
+    elif args.command == "discord":
+        from esporf.discord_bot import run_discord_bot
+
+        run_discord_bot()
 
 
 async def _backfill(pages: int) -> None:

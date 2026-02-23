@@ -380,55 +380,28 @@ class BetPick:
 
     @property
     def units(self) -> float:
-        """Recommended unit size based on confidence level and odds quality.
+        """Recommended unit size derived directly from confidence score.
 
-        Conservative by default — higher units reserved for the strongest edges.
-        Penalizes heavy juice (low payout) since even high hit rates produce
-        tiny profit.
+        Sharp tiers — big units only on the highest-conviction plays.
+        Heavy juice (odds worse than -200) caps sizing at 1.5u regardless
+        of confidence, since the payout doesn't justify the exposure.
         """
-        n_sources = len(self.supporting_trends)
-        top_rate = max(t.hit_rate for t in self.supporting_trends)
-        min_rate = min(t.hit_rate for t in self.supporting_trends)
-        avg_sample = sum(t.sample_size for t in self.supporting_trends) / max(n_sources, 1)
-        has_h2h = any(t.trend_type == "h2h" for t in self.supporting_trends)
+        c = self.confidence
 
-        # Start at 1u, add bonuses for strong signals
-        u = 1.0
+        if c >= 0.90:
+            u = 3.0
+        elif c >= 0.80:
+            u = 2.0
+        elif c >= 0.75:
+            u = 1.5
+        else:
+            u = 1.0
 
-        # Hit rate bonus
-        if top_rate >= 0.95:
-            u += 0.75
-        elif top_rate >= 0.90:
-            u += 0.50
-        elif top_rate >= 0.85:
-            u += 0.25
-
-        # Multi-source agreement bonus
-        if n_sources >= 4:
-            u += 0.50
-        elif n_sources >= 3:
-            u += 0.25
-
-        # Large sample bonus
-        if avg_sample >= 18:
-            u += 0.25
-
-        # Perfect storm: H2H backs it, 4+ sources, ALL above 85%
-        if has_h2h and n_sources >= 4 and min_rate >= 0.85:
-            u += 0.50
-
-        # Penalize heavy juice — cap units when payout is poor
+        # Heavy juice cap — don't overexpose on bad payout
         if self.is_heavy_juice:
-            u = min(u, 1.25)
+            u = min(u, 1.5)
 
-        # Boost for positive EV at plus-money odds (getting a good price)
-        ev = self.ev_per_unit
-        if ev is not None and ev > 0.20:
-            u += 0.25
-
-        # Snap DOWN to the nearest allowed tier (conservative)
-        tiers = [1.0, 1.5, 2.0, 2.5, 3.0]
-        return max(t for t in tiers if t <= u)
+        return u
 
     @property
     def units_display(self) -> str:
