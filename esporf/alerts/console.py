@@ -34,13 +34,18 @@ def display_matchup_report(report: MatchupReport) -> None:
     minutes = match.minutes_until
 
     pick = report.best_bet
-    if not pick:
-        # No pick: either no trends or no real sportsbook odds
-        has_odds = match.odds and match.odds.has_data
-        if not has_odds and report.has_trends:
-            console.print(f"  [dim]{kickoff}  {match.display_name} — no book odds[/dim]")
+    trend_pick = report.best_trend_pick if not pick else None
+
+    if not pick and not trend_pick:
+        if report.has_trends:
+            console.print(f"  [dim]{kickoff}  {match.display_name} — trends but no alertable lines[/dim]")
         else:
             console.print(f"  [dim]{kickoff}  {match.display_name} — no pick[/dim]")
+        return
+
+    # Use trend_pick when no real odds pick is available
+    if not pick and trend_pick:
+        _display_trend_only_card(report, trend_pick, kickoff, minutes)
         return
 
     # Top-line history stat
@@ -110,6 +115,60 @@ def display_matchup_report(report: MatchupReport) -> None:
 
     if context_parts:
         body += f"\n[dim]{' | '.join(context_parts)}[/dim]"
+
+    home_display = extract_handle(match.home)
+    away_display = extract_handle(match.away)
+
+    title = (
+        f"[bold]{home_display}[/] vs [bold]{away_display}[/]  "
+        f"[dim]| {kickoff} ({time_tag})[/dim]"
+    )
+
+    console.print(Panel(body, title=title, border_style=color, padding=(0, 2)))
+
+
+def _display_trend_only_card(
+    report: MatchupReport,
+    pick: "BetPick",
+    kickoff: str,
+    minutes: int,
+) -> None:
+    """Display a trend-only card when no sportsbook odds are available yet."""
+    from esporf.models import BetPick, _decimal_to_american
+
+    match = report.match
+    top_rate = max(t.hit_rate for t in pick.supporting_trends)
+    total_hits = sum(t.hits for t in pick.supporting_trends)
+    total_sample = sum(t.sample_size for t in pick.supporting_trends)
+
+    time_tag = f"in {minutes} min"
+    color = "green" if top_rate >= 0.80 else "yellow" if top_rate >= 0.70 else "bright_red"
+
+    # Implied fair odds from hit rate
+    fair_american = _decimal_to_american(1.0 / top_rate) if top_rate > 0 else "N/A"
+
+    body = (
+        f"[bold white]{pick.market.upper()}[/]  [dim](no book odds yet)[/dim]\n"
+        f"[bold]{top_rate:.0%}[/] hit rate  ({total_hits}/{total_sample})\n"
+        f"Fair price: [bold cyan]{fair_american}[/]  (anything better is +EV)"
+    )
+
+    # Show match context
+    context_parts: list[str] = []
+    if report.avg_goals is not None:
+        context_parts.append(f"Avg: {report.avg_goals:.1f} goals")
+    context_parts.append("Check your sportsbook for odds")
+
+    src_types = {t.trend_type for t in pick.supporting_trends}
+    ext_labels = []
+    if "tc_player" in src_types:
+        ext_labels.append("TotalCorner")
+    if "forebet" in src_types:
+        ext_labels.append("Forebet")
+    if ext_labels:
+        context_parts.append(f"+ {', '.join(ext_labels)}")
+
+    body += f"\n[dim]{' | '.join(context_parts)}[/dim]"
 
     home_display = extract_handle(match.home)
     away_display = extract_handle(match.away)

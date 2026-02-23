@@ -464,11 +464,97 @@ class MatchupReport:
         if has_real_odds:
             return self._best_bet_with_odds(market_groups, odds)
 
-        # No real sportsbook odds — don't guess. Without knowing what lines
-        # the book is actually offering and at what price, any recommendation
-        # is a shot in the dark. A 100% hit rate on O2.5 means nothing if
-        # the book isn't even offering that line.
+        # No real sportsbook odds — fall through to best_trend_pick
         return None
+
+    @property
+    def best_trend_pick(self) -> BetPick | None:
+        """Pick the best bet based on trends alone, without requiring odds.
+
+        Used for early alerts when sportsbook odds aren't available yet.
+        Only considers lines that Volta books typically offer (2.5, 3.5, 4.5).
+        Calculates implied fair odds from the hit rate so the user can compare
+        against whatever price their sportsbook shows.
+        """
+        if not self.trends:
+            return None
+        # Don't generate trend-only pick if we already have a real odds pick
+        if self.best_bet is not None:
+            return None
+
+        from esporf.config import settings
+        book_lines = set(settings.volta_book_line_values)
+
+        market_groups: dict[str, list[Trend]] = {}
+        for t in self.trends:
+            market_groups.setdefault(t.category, []).append(t)
+
+        return self._best_trend_only_pick(market_groups, book_lines)
+
+    def _best_trend_only_pick(
+        self,
+        market_groups: dict[str, list[Trend]],
+        book_lines: set[float],
+    ) -> BetPick | None:
+        """Pick the best trend using only historical data — no real odds needed.
+
+        Ranks by agreement × hit rate, restricted to lines that Volta books
+        typically offer. Includes implied fair odds in the reason string so
+        the user knows what price represents +EV.
+        """
+        best_market: str | None = None
+        best_score = 0.0
+        best_trends: list[Trend] = []
+
+        for market, trends in market_groups.items():
+            parsed = _parse_line(market)
+            if not parsed:
+                continue  # skip non-line markets (Win/Draw) without odds
+
+            direction, line = parsed
+            if line not in book_lines:
+                continue  # only recommend lines the book actually offers
+
+            agreement = len(trends)
+            avg_rate = sum(t.hit_rate for t in trends) / agreement
+            avg_sample = sum(t.sample_size for t in trends) / agreement
+
+            # Score: 40% hit rate, 30% agreement, 30% sample size
+            score = (
+                avg_rate * 0.40
+                + min(agreement / 5, 1.0) * 0.30
+                + min(avg_sample / 20, 1.0) * 0.30
+            )
+
+            if score > best_score:
+                best_score = score
+                best_market = market
+                best_trends = trends
+
+        if best_market is None:
+            return None
+
+        top_rate = max(t.hit_rate for t in best_trends)
+        sources = ", ".join(sorted({_trend_source_label(t.trend_type) for t in best_trends}))
+
+        # Calculate implied fair odds from hit rate
+        fair_american = _decimal_to_american(1.0 / top_rate) if top_rate > 0 else "N/A"
+
+        reason = (
+            f"{best_market} backed by {len(best_trends)} trend(s) "
+            f"({sources}) — {top_rate:.0%} hit rate — "
+            f"fair price: {fair_american}"
+        )
+
+        return BetPick(
+            market=best_market,
+            confidence=best_score,
+            supporting_trends=best_trends,
+            reason=reason,
+            odds_line=None,
+            moneyline=None,
+            edge=None,
+        )
 
     def _best_bet_with_odds(
         self,

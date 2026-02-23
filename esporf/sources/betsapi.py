@@ -384,25 +384,221 @@ class BetsAPIClient:
 
         return odds
 
+    async def get_event_odds_summary(self, event_id: str) -> MatchOdds:
+        """Fetch latest odds snapshot via /v2/event/odds/summary.
+
+        This endpoint returns only the most recent odds for an event,
+        which may be populated before the full odds history endpoint.
+        Same response format as /v2/event/odds but with only the latest entry.
+        """
+        odds = MatchOdds()
+        try:
+            data = await self._request_raw(
+                f"{_API_ROOT}/v2/event/odds/summary",
+                params={"event_id": event_id},
+            )
+        except Exception as e:
+            logger.debug("Odds summary failed for event %s: %s", event_id, e)
+            return odds
+
+        results = data.get("results", {})
+        odds_data = results.get("odds", results)
+
+        seen_lines: set[float] = set()
+        for entry in odds_data.get("1_3", []):
+            for line in self._parse_ou_odds(entry):
+                if line.line not in seen_lines:
+                    seen_lines.add(line.line)
+                    odds.total_lines.append(line)
+
+        ml_entries = odds_data.get("1_1", [])
+        if ml_entries:
+            ml = self._parse_moneyline(ml_entries[-1])
+            if ml:
+                odds.moneyline = ml
+
+        return odds
+
+    async def get_bet365_prematch_odds(self, event_id: str) -> MatchOdds:
+        """Fetch prematch odds from bet365's direct data feed.
+
+        Uses /v3/bet365/prematch which reads directly from bet365's
+        prematch market. This may have odds available before the generic
+        /v2/event/odds endpoint since it taps bet365's prematch pipeline.
+
+        The FI parameter accepts the BetsAPI event_id — b365api maps it
+        internally to bet365's fixture ID.
+        """
+        odds = MatchOdds()
+        try:
+            data = await self._request(
+                "/bet365/prematch",
+                params={"FI": event_id},
+            )
+        except Exception as e:
+            logger.debug("bet365 prematch failed for %s: %s", event_id, e)
+            return odds
+
+        results = data.get("results", {})
+        if not results:
+            return odds
+
+        # Log raw structure on first success so we can refine parsing
+        logger.debug(
+            "bet365 prematch raw keys for %s: %s",
+            event_id,
+            list(results.keys()) if isinstance(results, dict) else type(results).__name__,
+        )
+
+        return self._parse_bet365_prematch(results)
+
+    @staticmethod
+    def _parse_bet365_prematch(results: dict | list) -> MatchOdds:
+        """Parse bet365 prematch response into MatchOdds.
+
+        The bet365 prematch format is a hierarchical tree:
+        - Market groups contain markets
+        - Markets contain selections with OD (odds), HA (handicap), NA (name)
+
+        We look for Over/Under (Goals) and Full Time Result (1X2).
+        """
+        odds = MatchOdds()
+
+        # results can be a dict with market data or a list of market groups
+        items = results if isinstance(results, list) else [results]
+
+        # Flatten: collect all nested dicts that look like market data
+        all_nodes: list[dict] = []
+        _collect_bet365_nodes(items, all_nodes)
+
+        seen_lines: set[float] = set()
+        home_ml = away_ml = draw_ml = 0.0
+
+        for node in all_nodes:
+            na = str(node.get("NA", "")).strip()
+            od_raw = node.get("OD", "")
+            ha = node.get("HA", "")
+
+            # Parse fractional or decimal odds
+            dec_odds = _parse_bet365_odds(od_raw)
+            if dec_odds is None or dec_odds <= 1.0:
+                continue
+
+            na_lower = na.lower()
+
+            # Over/Under goals
+            if na_lower.startswith("over") and ha:
+                try:
+                    line = float(ha)
+                    if line > 0 and round(line % 1, 2) == 0.5 and line not in seen_lines:
+                        # We'll pair with Under later
+                        seen_lines.add(line)
+                        odds.total_lines.append(
+                            OddsLine(line=line, over_odds=dec_odds, under_odds=1.95, source="bet365")
+                        )
+                except (ValueError, TypeError):
+                    pass
+            elif na_lower.startswith("under") and ha:
+                try:
+                    line = float(ha)
+                    if line > 0 and round(line % 1, 2) == 0.5:
+                        # Update existing line with real under odds
+                        for ol in odds.total_lines:
+                            if ol.line == line:
+                                ol.under_odds = dec_odds
+                                break
+                        else:
+                            # Under came before Over — add placeholder
+                            if line not in seen_lines:
+                                seen_lines.add(line)
+                                odds.total_lines.append(
+                                    OddsLine(line=line, over_odds=1.85, under_odds=dec_odds, source="bet365")
+                                )
+                except (ValueError, TypeError):
+                    pass
+
+            # 1X2 moneyline
+            elif na_lower in ("1", "home", "draw", "x", "2", "away"):
+                if na_lower in ("1", "home"):
+                    home_ml = dec_odds
+                elif na_lower in ("x", "draw"):
+                    draw_ml = dec_odds
+                elif na_lower in ("2", "away"):
+                    away_ml = dec_odds
+
+        if home_ml > 0 and away_ml > 0:
+            odds.moneyline = MoneylineOdds(
+                home_odds=home_ml,
+                draw_odds=draw_ml,
+                away_odds=away_ml,
+                source="bet365",
+            )
+
+        if odds.has_data:
+            logger.info(
+                "bet365 prematch yielded %d O/U line(s), ML=%s",
+                len(odds.total_lines),
+                "yes" if odds.moneyline else "no",
+            )
+
+        return odds
+
     async def fetch_odds_batch(
         self, matches: list[UpcomingMatch], delay: float = 0.3
     ) -> None:
         """Fetch odds for a batch of matches, attaching results to each.
+
+        Cascades through three endpoints for maximum coverage:
+        1. /v2/event/odds — standard odds history
+        2. /v2/event/odds/summary — latest snapshot (may arrive earlier)
+        3. /v3/bet365/prematch — direct bet365 prematch feed
 
         Adds a small delay between API calls to respect rate limits.
         Modifies matches in-place by setting their ``odds`` attribute.
         """
         for match in matches:
             try:
+                # 1. Standard odds endpoint
                 new_odds = await self.get_event_odds(match.match_id)
                 if new_odds.has_data:
                     match.odds = new_odds
-                    lines = match.odds.available_lines
                     logger.info(
-                        "Odds for %s: lines=%s", match.display_name, lines
+                        "Odds for %s via v2/odds: lines=%s",
+                        match.display_name, match.odds.available_lines,
+                    )
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    continue
+
+                if delay > 0:
+                    await asyncio.sleep(delay)
+
+                # 2. Odds summary fallback
+                new_odds = await self.get_event_odds_summary(match.match_id)
+                if new_odds.has_data:
+                    match.odds = new_odds
+                    logger.info(
+                        "Odds for %s via v2/odds/summary: lines=%s",
+                        match.display_name, match.odds.available_lines,
+                    )
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    continue
+
+                if delay > 0:
+                    await asyncio.sleep(delay)
+
+                # 3. bet365 prematch feed
+                new_odds = await self.get_bet365_prematch_odds(match.match_id)
+                if new_odds.has_data:
+                    match.odds = new_odds
+                    logger.info(
+                        "Odds for %s via bet365/prematch: lines=%s",
+                        match.display_name, match.odds.available_lines,
                     )
                 else:
-                    logger.debug("No odds data for %s", match.display_name)
+                    logger.debug("No odds from any source for %s", match.display_name)
+
             except Exception as e:
                 logger.debug("Odds fetch error for %s: %s", match.display_name, e)
             if delay > 0:
@@ -508,4 +704,44 @@ def _safe_int(val: Any) -> int | None:
     try:
         return int(val)
     except (ValueError, TypeError):
+        return None
+
+
+def _collect_bet365_nodes(items: list | dict, out: list[dict]) -> None:
+    """Recursively collect all dict nodes from a bet365 prematch response.
+
+    The bet365 prematch format is a nested tree of market groups, markets,
+    and selections. This flattens everything so we can scan for odds data.
+    """
+    if isinstance(items, dict):
+        out.append(items)
+        for v in items.values():
+            if isinstance(v, (list, dict)):
+                _collect_bet365_nodes(v, out)
+    elif isinstance(items, list):
+        for item in items:
+            if isinstance(item, (list, dict)):
+                _collect_bet365_nodes(item, out)
+
+
+def _parse_bet365_odds(od_raw: Any) -> float | None:
+    """Parse bet365 odds value which can be decimal or fractional (e.g. '2/1')."""
+    if od_raw is None:
+        return None
+    s = str(od_raw).strip()
+    if not s:
+        return None
+
+    # Fractional: "2/1" → 3.0
+    if "/" in s:
+        try:
+            num, den = s.split("/", 1)
+            return float(num) / float(den) + 1.0
+        except (ValueError, ZeroDivisionError):
+            return None
+
+    # Decimal: "1.85"
+    try:
+        return float(s)
+    except ValueError:
         return None

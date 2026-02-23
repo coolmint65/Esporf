@@ -330,28 +330,32 @@ class EsporfBot:
 
         # Display results
         reports_with_picks = [r for r in reports if r.best_bet is not None]
-        reports_no_odds = [
+        reports_trend_only = [
             r for r in reports
-            if r.has_trends and r.best_bet is None
+            if r.has_trends and r.best_bet is None and r.best_trend_pick is not None
         ]
+        all_alertable = reports_with_picks + reports_trend_only
 
         display_scan_summary(
             total_matches=len(all_upcoming),
-            matches_with_trends=len(reports_with_picks),
-            total_trends=sum(len(r.trends) for r in reports_with_picks),
+            matches_with_trends=len(all_alertable),
+            total_trends=sum(len(r.trends) for r in all_alertable),
             db_total=self.db.total_matches(),
         )
-        if reports_no_odds:
+        if reports_trend_only:
             console.print(
-                f"  [dim]{len(reports_no_odds)} match(es) have trends but no book odds[/dim]"
+                f"  [dim]{len(reports_trend_only)} match(es) alerting on trends (no book odds yet)[/dim]"
             )
 
         for report in reports:
             display_matchup_report(report)
 
-        # Send webhook alerts only for matches with real picks (actual odds)
+        # Send alerts for matches with real odds OR strong trend-only picks.
+        # Track alerted matches to avoid duplicate alerts. When a trend-only
+        # alert is sent first and real odds arrive later, the match won't be
+        # re-alerted (the early heads-up is enough).
         new_reports = [
-            r for r in reports_with_picks
+            r for r in all_alertable
             if r.match.match_id not in self._alerted_match_ids
         ]
         if new_reports:
@@ -359,7 +363,7 @@ class EsporfBot:
             for r in new_reports:
                 self._alerted_match_ids.add(r.match.match_id)
 
-        return reports_with_picks
+        return all_alertable
 
     async def run(self) -> None:
         """Run the bot in a continuous polling loop."""
@@ -372,7 +376,7 @@ class EsporfBot:
             f"  Poll interval: {interval}s\n"
             f"  Schedule: [bold green]AceOdds[/bold green] + ESportsBattle + BetsAPI\n"
             f"  External: [bold cyan]TotalCorner[/bold cyan] + Forebet\n"
-            f"  Odds: BetsAPI v2\n"
+            f"  Odds: BetsAPI v2 → odds/summary → bet365/prematch\n"
             f"  Min hit rate: {settings.min_hit_rate:.0%}\n"
             f"  Min sample size: {settings.min_sample_size}\n"
             f"  Goal lines: {settings.goal_lines} + book-offered\n"
