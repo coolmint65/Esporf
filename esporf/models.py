@@ -434,15 +434,10 @@ class MatchupReport:
     trends: list[Trend]
     generated_at: float = field(default_factory=time.time)
     avg_goals: float | None = None  # match-specific expected total goals
-    # Goal-line trends detected at a lower threshold (55%) — used
-    # exclusively by best_trend_pick so that moderate-confidence
-    # lines (55-64%) can surface when the juice cap allows them.
-    # Normal trends (70%+) are in `trends` for everything else.
-    relaxed_trends: list[Trend] = field(default_factory=list)
 
     @property
     def has_trends(self) -> bool:
-        return len(self.trends) > 0 or len(self.relaxed_trends) > 0
+        return len(self.trends) > 0
 
     @property
     def best_bet(self) -> BetPick | None:
@@ -469,131 +464,8 @@ class MatchupReport:
         if has_real_odds:
             return self._best_bet_with_odds(market_groups, odds)
 
-        # No real sportsbook odds — fall through to best_trend_pick
+        # No real sportsbook odds — no pick
         return None
-
-    @property
-    def best_trend_pick(self) -> BetPick | None:
-        """Pick the best bet based on trends alone, without requiring odds.
-
-        Used for early alerts when sportsbook odds aren't available yet.
-        Only considers lines that Volta books typically offer (2.5, 3.5, 4.5).
-
-        Only fires within 20 minutes of kickoff — far enough ahead to
-        open your sportsbook and place the bet, but not so far that you
-        get flooded with alerts for every match on the schedule.
-        """
-        # Use relaxed trends (55%+) if available, fall back to normal
-        source = self.relaxed_trends or self.trends
-        if not source:
-            return None
-        # Don't generate trend-only pick if we already have a real odds pick
-        if self.best_bet is not None:
-            return None
-        # Only alert within 20 minutes of kickoff
-        if not self.match.starts_within(1200):
-            return None
-
-        from esporf.config import settings
-        book_lines = set(settings.volta_book_line_values)
-
-        market_groups: dict[str, list[Trend]] = {}
-        for t in source:
-            market_groups.setdefault(t.category, []).append(t)
-
-        return self._best_trend_only_pick(market_groups, book_lines)
-
-    def _best_trend_only_pick(
-        self,
-        market_groups: dict[str, list[Trend]],
-        book_lines: set[float],
-    ) -> BetPick | None:
-        """Pick the best trend using only historical data — no real odds needed.
-
-        Strategy: pick the **tightest line** (highest number) that still
-        meets the hit rate threshold. Low lines like O2.5 at 95% are
-        useless — no sportsbook offers a reasonable price on a near-certainty.
-        Tighter lines (O3.5 at 78%, O4.5 at 65%) are where real value lives
-        because the book will actually offer bettable odds.
-
-        Only considers lines the book typically offers (volta_book_lines).
-        Requires at least the configured min_hit_rate to qualify.
-        """
-        # Collect qualifying lines, then pick the tightest one.
-        # We use a LOWER hit rate floor (55%) than the main trend detector
-        # because the juice cap below is the real quality gate.  Individual
-        # trends are already ≥ min_hit_rate (70%) from the analyzer — this
-        # floor just catches edge cases.
-        TREND_ONLY_MIN_RATE = 0.55
-
-        candidates: list[tuple[float, str, list[Trend]]] = []
-
-        for market, trends in market_groups.items():
-            parsed = _parse_line(market)
-            if not parsed:
-                continue
-
-            direction, line = parsed
-            if line not in book_lines:
-                continue
-
-            agreement = len(trends)
-            avg_rate = sum(t.hit_rate for t in trends) / agreement
-
-            if avg_rate < TREND_ONLY_MIN_RATE:
-                continue
-
-            # Skip if implied fair odds are too juicy.  If our trend says
-            # 75% hit rate the sportsbook will price it around -300 — no
-            # value laying that much juice.  Cap at -180 (decimal 1.556).
-            implied_dec = 1.0 / avg_rate if avg_rate > 0 else 999.0
-            if implied_dec < 1.556:  # worse than -180
-                continue
-
-            # Must have multiple sources or strong sample to recommend
-            if agreement < 2:
-                avg_sample = sum(t.sample_size for t in trends) / agreement
-                if avg_sample < 15:
-                    continue
-
-            candidates.append((line, market, trends))
-
-        if not candidates:
-            return None
-
-        # Pick the tightest line (highest number) — that's where books
-        # will offer real odds and where our edge is most exploitable
-        candidates.sort(key=lambda c: c[0], reverse=True)
-        best_line, best_market, best_trends = candidates[0]
-
-        top_rate = max(t.hit_rate for t in best_trends)
-        sources = ", ".join(sorted({_trend_source_label(t.trend_type) for t in best_trends}))
-
-        # Confidence score for unit sizing (not used for trend-only, but
-        # needed for the BetPick dataclass)
-        agreement = len(best_trends)
-        avg_rate = sum(t.hit_rate for t in best_trends) / agreement
-        avg_sample = sum(t.sample_size for t in best_trends) / agreement
-        confidence = (
-            avg_rate * 0.40
-            + min(agreement / 5, 1.0) * 0.30
-            + min(avg_sample / 20, 1.0) * 0.30
-        )
-
-        reason = (
-            f"{best_market} backed by {len(best_trends)} trend(s) "
-            f"({sources}) — {top_rate:.0%} hit rate"
-        )
-
-        return BetPick(
-            market=best_market,
-            confidence=confidence,
-            supporting_trends=best_trends,
-            reason=reason,
-            odds_line=None,
-            moneyline=None,
-            edge=None,
-        )
 
     def _best_bet_with_odds(
         self,

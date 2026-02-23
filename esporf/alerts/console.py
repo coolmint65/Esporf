@@ -34,18 +34,15 @@ def display_matchup_report(report: MatchupReport) -> None:
     minutes = match.minutes_until
 
     pick = report.best_bet
-    trend_pick = report.best_trend_pick if not pick else None
 
-    if not pick and not trend_pick:
-        if report.has_trends:
-            console.print(f"  [dim]{kickoff}  {match.display_name} — trends but no alertable lines[/dim]")
+    if not pick:
+        has_odds = match.odds and match.odds.has_data
+        if report.has_trends and not has_odds:
+            console.print(f"  [dim]{kickoff}  {match.display_name} — waiting for book odds[/dim]")
+        elif report.has_trends:
+            console.print(f"  [dim]{kickoff}  {match.display_name} — trends but no edge vs book[/dim]")
         else:
             console.print(f"  [dim]{kickoff}  {match.display_name} — no pick[/dim]")
-        return
-
-    # Use trend_pick when no real odds pick is available
-    if not pick and trend_pick:
-        _display_trend_only_card(report, trend_pick, kickoff, minutes)
         return
 
     # Top-line history stat
@@ -127,63 +124,16 @@ def display_matchup_report(report: MatchupReport) -> None:
     console.print(Panel(body, title=title, border_style=color, padding=(0, 2)))
 
 
-def _display_trend_only_card(
-    report: MatchupReport,
-    pick: "BetPick",
-    kickoff: str,
-    minutes: int,
-) -> None:
-    """Display a trend-only card when no sportsbook odds are available yet."""
-    match = report.match
-    top_rate = max(t.hit_rate for t in pick.supporting_trends)
-    total_hits = sum(t.hits for t in pick.supporting_trends)
-    total_sample = sum(t.sample_size for t in pick.supporting_trends)
-
-    time_tag = f"in {minutes} min"
-    color = "green" if top_rate >= 0.80 else "yellow" if top_rate >= 0.70 else "bright_red"
-
-    body = (
-        f"[bold white]{pick.market.upper()}[/]  [dim](no book odds yet)[/dim]\n"
-        f"[bold]{top_rate:.0%}[/] hit rate  ({total_hits}/{total_sample})"
-    )
-
-    # Show match context
-    context_parts: list[str] = []
-    if report.avg_goals is not None:
-        context_parts.append(f"Avg: {report.avg_goals:.1f} goals")
-
-    src_types = {t.trend_type for t in pick.supporting_trends}
-    ext_labels = []
-    if "tc_player" in src_types:
-        ext_labels.append("TotalCorner")
-    if "forebet" in src_types:
-        ext_labels.append("Forebet")
-    if ext_labels:
-        context_parts.append(f"+ {', '.join(ext_labels)}")
-
-    body += f"\n[dim]{' | '.join(context_parts)}[/dim]"
-
-    home_display = extract_handle(match.home)
-    away_display = extract_handle(match.away)
-
-    title = (
-        f"[bold]{home_display}[/] vs [bold]{away_display}[/]  "
-        f"[dim]| {kickoff} ({time_tag})[/dim]"
-    )
-
-    console.print(Panel(body, title=title, border_style=color, padding=(0, 2)))
-
-
 def display_scan_summary(
     total_matches: int,
-    matches_with_trends: int,
+    matches_with_picks: int,
     total_trends: int,
     db_total: int,
 ) -> None:
     """One-line scan summary."""
-    c = "green" if matches_with_trends > 0 else "yellow"
+    c = "green" if matches_with_picks > 0 else "yellow"
     console.print(
-        f"  [{c}]{matches_with_trends}[/] pick(s) from "
+        f"  [{c}]{matches_with_picks}[/] odds-backed pick(s) from "
         f"{total_matches} match(es)  [dim]|  DB: {db_total:,}[/dim]"
     )
 

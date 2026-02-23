@@ -34,20 +34,12 @@ def _confidence_color(confidence: float) -> int:
 
 
 def _build_discord_embed(report: MatchupReport) -> dict:
-    """Build a clean Discord embed card for a bet pick.
-
-    Works with both real-odds picks (best_bet) and trend-only picks
-    (best_trend_pick). Trend-only embeds include implied fair odds
-    so the user can compare against their sportsbook.
-    """
+    """Build a clean Discord embed card for an odds-backed bet pick."""
     match = report.match
 
-    # Use real pick if available, otherwise trend-only pick
-    pick = report.best_bet or report.best_trend_pick
+    pick = report.best_bet
     if not pick:
         return {}
-
-    is_trend_only = report.best_bet is None
 
     # Hard guard — never build an embed for a non-tracked league
     if match.league_id not in set(settings.tracked_league_ids):
@@ -90,12 +82,7 @@ def _build_discord_embed(report: MatchupReport) -> dict:
 
 
 async def send_discord_alert(reports: list[MatchupReport]) -> None:
-    """Send trend alerts to a Discord channel via webhook embeds.
-
-    Sends alerts for both real-odds picks and trend-only picks.
-    Trend-only picks get sent when there are strong trends but no
-    sportsbook odds yet, giving the user early notice to check their book.
-    """
+    """Send odds-backed bet alerts to a Discord channel via webhook embeds."""
     url = settings.discord_webhook_url
     if not url:
         return
@@ -113,29 +100,22 @@ async def send_discord_alert(reports: list[MatchupReport]) -> None:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(url, json=payload)
                 resp.raise_for_status()
-                pick_type = "trend-only" if report.best_bet is None else "odds-backed"
-                logger.info("Discord alert (%s) sent for %s", pick_type, report.match.display_name)
+                logger.info("Discord alert sent for %s", report.match.display_name)
         except Exception as e:
             logger.warning("Failed to send Discord alert: %s", e)
 
 
 async def send_alerts(reports: list[MatchupReport]) -> None:
-    """Send alerts through Discord.
+    """Send alerts through Discord for odds-backed picks only.
 
-    Sends alerts for matches with either:
-    - Real odds-backed picks (best_bet), or
-    - Trend-only picks (best_trend_pick) when odds aren't available yet
-
-    Only sends alerts for matches belonging to a tracked league —
-    this is the final gate that prevents GT Leagues / GG League
-    alerts from reaching Discord even if upstream filters miss them.
+    Only sends alerts for matches that have real sportsbook odds
+    and belong to a tracked league.
     """
     tracked = set(settings.tracked_league_ids)
     alertable = [
         r for r in reports
-        if r.has_trends
+        if r.best_bet is not None
         and r.match.league_id in tracked
-        and (r.best_bet is not None or r.best_trend_pick is not None)
     ]
     if not alertable:
         return

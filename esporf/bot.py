@@ -1,12 +1,13 @@
-"""Main bot loop — polls for upcoming matches, analyzes trends, sends alerts.
+"""Main bot loop — polls for upcoming matches, finds odds-backed picks, sends alerts.
 
 Workflow:
 1. On first run, backfill match history from BetsAPI into SQLite
 2. Every cycle: fetch newly ended matches and add to DB
 3. Fetch upcoming matches from AceOdds (full day) + ESportsBattle (~30 min) + BetsAPI
 4. Fetch external stats from TotalCorner (per-player) + Forebet (predictions)
-5. Run trend analysis on each matchup (with external data when available)
-6. Display results and send webhook alerts for qualifying trends
+5. Fetch real sportsbook odds from BetsAPI (bet365) + bwin
+6. Run trend analysis and only surface picks with real odds + positive edge
+7. Send webhook alerts for qualifying odds-backed picks only
 """
 
 from __future__ import annotations
@@ -406,37 +407,25 @@ class EsporfBot:
             )
             reports.append(report)
 
-        # Display results
+        # Display results — only picks backed by real sportsbook odds
         reports_with_picks = [r for r in reports if r.best_bet is not None]
-        reports_trend_only = [
-            r for r in reports
-            if r.has_trends and r.best_bet is None and r.best_trend_pick is not None
-        ]
-        all_alertable = reports_with_picks + reports_trend_only
 
         display_scan_summary(
             total_matches=len(all_upcoming),
-            matches_with_trends=len(all_alertable),
-            total_trends=sum(len(r.trends) for r in all_alertable),
+            matches_with_picks=len(reports_with_picks),
+            total_trends=sum(len(r.trends) for r in reports_with_picks),
             db_total=self.db.total_matches(),
         )
-        if reports_trend_only:
-            console.print(
-                f"  [dim]{len(reports_trend_only)} match(es) alerting on trends (no book odds yet)[/dim]"
-            )
 
         for report in reports:
             display_matchup_report(report)
 
-        # Send alerts for matches with real odds OR strong trend-only picks.
-        # Track alerted matches to avoid duplicate alerts. When a trend-only
-        # alert is sent first and real odds arrive later, the match won't be
-        # re-alerted (the early heads-up is enough).
+        # Send alerts only for picks backed by real sportsbook odds.
         # Uses the content-based _match_key (players + start_time) instead
         # of match_id, which can change between scans when BetsAPI
         # cross-references an ace_/esb_ match with a different numeric ID.
         new_reports = [
-            r for r in all_alertable
+            r for r in reports_with_picks
             if _match_key(r.match) not in self._alerted_keys
         ]
         if new_reports:
@@ -444,7 +433,7 @@ class EsporfBot:
             for r in new_reports:
                 self._alerted_keys.add(_match_key(r.match))
 
-        return all_alertable
+        return reports_with_picks
 
     async def run(self) -> None:
         """Run the bot in a continuous polling loop."""
@@ -452,15 +441,15 @@ class EsporfBot:
         interval = settings.poll_interval
 
         console.print(
-            f"[bold blue]Esporf Trend Bot Starting[/bold blue]\n"
+            f"[bold blue]Esporf Odds Bot Starting[/bold blue]\n"
             f"  Tracking leagues: {settings.league_ids}\n"
             f"  Poll interval: {interval}s\n"
             f"  Schedule: [bold green]AceOdds[/bold green] + ESportsBattle + BetsAPI\n"
             f"  External: [bold cyan]TotalCorner[/bold cyan] + Forebet\n"
             f"  Odds: BetsAPI (bet365) → [bold magenta]bwin[/bold magenta] fallback\n"
+            f"  Mode: [bold green]Sportsbook odds only[/bold green] (no trend-only picks)\n"
             f"  Min hit rate: {settings.min_hit_rate:.0%}\n"
             f"  Min sample size: {settings.min_sample_size}\n"
-            f"  Goal lines: {settings.goal_lines} + book-offered\n"
             f"  Press Ctrl+C to stop\n"
         )
 

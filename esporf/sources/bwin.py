@@ -47,8 +47,8 @@ _CDS_BASE = "https://cds-api.bwin.com"
 # How long a fetched token stays valid before we refresh (30 min)
 _TOKEN_TTL = 1800
 
-# How long fetched odds stay cached (45 seconds — aligned with poll interval)
-_ODDS_CACHE_TTL = 45
+# How long fetched odds stay cached (15 seconds — fast refresh for early odds)
+_ODDS_CACHE_TTL = 15
 
 # ── Market name patterns for parsing bwin's offer names ──────────────
 # bwin labels Over/Under markets like "Over/Under 4.5" or "Total Goals Over/Under"

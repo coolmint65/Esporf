@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     timezone: str = "US/Eastern"
 
     # Polling & schedule
-    poll_interval: int = 45  # seconds — fast enough to catch Volta's brief listing window
+    poll_interval: int = 20  # seconds — fast polling to catch sportsbook odds quickly
     schedule_lookahead: int = 1800  # seconds (30 min) — how far ahead to show/alert matches
 
     # Trend detection thresholds
