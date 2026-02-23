@@ -5,7 +5,7 @@ Workflow:
 2. Every cycle: fetch newly ended matches and add to DB
 3. Fetch upcoming matches from AceOdds (full day) + ESportsBattle (~30 min) + BetsAPI
 4. Fetch external stats from TotalCorner (per-player) + Forebet (predictions)
-5. Fetch real sportsbook odds from BetsAPI (bet365) + bwin
+5. Fetch real sportsbook odds from BetsAPI (bet365) + Kambi
 6. Run trend analysis and only surface picks with real odds + positive edge
 7. Send webhook alerts for qualifying odds-backed picks only
 """
@@ -30,7 +30,6 @@ from esporf.database import MatchDatabase
 from esporf.models import MatchupReport, UpcomingMatch, extract_handle
 from esporf.sources.aceodds import AceOddsClient
 from esporf.sources.betsapi import BetsAPIClient
-from esporf.sources.bwin import BwinClient
 from esporf.sources.esportsbattle import ESportsBattleClient
 from esporf.sources.forebet import ForebetClient
 from esporf.sources.kambi import KambiClient
@@ -58,7 +57,6 @@ class EsporfBot:
         self.api = BetsAPIClient()
         self.esb = ESportsBattleClient()
         self.ace = AceOddsClient()
-        self.bwin = BwinClient()
         self.kambi = KambiClient()
         self.tc = TotalCornerClient()
         self.forebet = ForebetClient()
@@ -353,7 +351,7 @@ class EsporfBot:
             except Exception as e:
                 logger.warning("Late BetsAPI cross-ref failed: %s", e)
 
-        # Fetch real odds — BetsAPI first, then bwin for anything still missing
+        # Fetch real odds — BetsAPI first, then Kambi for anything still missing
         betsapi_matches = [
             m for m in all_upcoming
             if not m.match_id.startswith(("esb_", "ace_"))
@@ -361,28 +359,19 @@ class EsporfBot:
         if betsapi_matches:
             await self.api.fetch_odds_batch(betsapi_matches)
 
-        # Kambi fills gaps first: free public API, no auth, pre-live odds
+        # Kambi fills gaps: free public API, no auth, pre-live odds
         kambi_count = 0
         try:
             kambi_count = await self.kambi.attach_odds(all_upcoming)
         except Exception as e:
             logger.warning("kambi odds fetch failed: %s", e)
 
-        # bwin fills remaining gaps
-        bwin_count = 0
-        try:
-            bwin_count = await self.bwin.attach_odds(all_upcoming)
-        except Exception as e:
-            logger.warning("bwin odds fetch failed: %s", e)
-
         odds_count = sum(1 for m in all_upcoming if m.odds and m.odds.has_data)
         if odds_count:
             sources = []
-            betsapi_count = odds_count - bwin_count - kambi_count
+            betsapi_count = odds_count - kambi_count
             if betsapi_count > 0:
                 sources.append(f"BetsAPI: {betsapi_count}")
-            if bwin_count > 0:
-                sources.append(f"bwin: {bwin_count}")
             if kambi_count > 0:
                 sources.append(f"Kambi: {kambi_count}")
             console.print(
@@ -397,7 +386,7 @@ class EsporfBot:
             console.print(
                 f"  [yellow]No odds for any of {len(all_upcoming)} match(es). "
                 f"{no_id} still without BetsAPI ID, "
-                f"bwin attached {bwin_count}, kambi attached {kambi_count}.[/yellow]"
+                f"kambi attached {kambi_count}.[/yellow]"
             )
 
         # Get Forebet predictions (already cached from _fetch_external_data)
@@ -465,7 +454,7 @@ class EsporfBot:
             f"  Poll interval: {interval}s\n"
             f"  Schedule: [bold green]AceOdds[/bold green] + ESportsBattle + BetsAPI\n"
             f"  External: [bold cyan]TotalCorner[/bold cyan] + Forebet\n"
-            f"  Odds: BetsAPI (bet365) → [bold cyan]Kambi[/bold cyan] → [bold magenta]bwin[/bold magenta] fallback\n"
+            f"  Odds: BetsAPI (bet365) → [bold cyan]Kambi[/bold cyan] fallback\n"
             f"  Mode: [bold green]Sportsbook odds only[/bold green] (no trend-only picks)\n"
             f"  Min hit rate: {settings.min_hit_rate:.0%}\n"
             f"  Min sample size: {settings.min_sample_size}\n"
