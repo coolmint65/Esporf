@@ -27,7 +27,17 @@ from esporf.alerts.webhooks import send_alerts
 from esporf.analysis.trends import TrendAnalyzer
 from esporf.config import settings
 from esporf.database import MatchDatabase
-from esporf.models import MatchupReport, UpcomingMatch, extract_handle
+from esporf.models import (
+    BetPick,
+    MatchResult,
+    MatchupReport,
+    PickResult,
+    TrackedPick,
+    UpcomingMatch,
+    extract_handle,
+    _parse_line,
+    _parse_spread,
+)
 from esporf.sources.aceodds import AceOddsClient
 from esporf.sources.betsapi import BetsAPIClient
 from esporf.sources.esportsbattle import ESportsBattleClient
@@ -66,6 +76,164 @@ class EsporfBot:
         self._scan_count = 0
         self._alerted_keys: set[str] = set()
         self._skip_webhook_alerts = skip_webhook_alerts
+
+    # ── Pick tracking ────────────────────────────────────────────
+
+    def record_pick(self, report: MatchupReport) -> TrackedPick | None:
+        """Record an alerted pick in the database for W/L tracking."""
+        pick = report.best_bet
+        if not pick:
+            return None
+
+        tracked = TrackedPick(
+            match_id=report.match.match_id,
+            league_id=report.match.league_id,
+            home=report.match.home,
+            away=report.match.away,
+            start_time=report.match.start_time,
+            market=pick.market,
+            units=pick.units,
+            odds=pick.decimal_odds,
+            hit_rate=max(t.hit_rate for t in pick.supporting_trends),
+            edge=pick.edge,
+            created_at=int(time.time()),
+        )
+        row_id = self.db.insert_pick(tracked)
+        tracked.id = row_id
+        logger.info("Recorded pick #%d: %s %s", row_id, report.match.display_name, pick.market)
+        return tracked
+
+    def resolve_pending_picks(self) -> list[TrackedPick]:
+        """Check pending picks against completed match results and resolve them."""
+        pending = self.db.get_pending_picks()
+        if not pending:
+            return []
+
+        resolved: list[TrackedPick] = []
+        now = int(time.time())
+
+        for pick in pending:
+            # Look up the match result by trying to find it in the DB
+            result_match = self._find_match_result(pick)
+            if result_match is None:
+                continue
+
+            outcome, profit = self._evaluate_pick(pick, result_match)
+            self.db.resolve_pick(
+                pick_id=pick.id,
+                result=outcome,
+                profit=profit,
+                home_score=result_match.home_score,
+                away_score=result_match.away_score,
+                resolved_at=now,
+            )
+
+            pick.result = outcome
+            pick.profit = profit
+            pick.home_score = result_match.home_score
+            pick.away_score = result_match.away_score
+            pick.resolved_at = now
+            resolved.append(pick)
+
+            emoji = pick.result_emoji
+            logger.info(
+                "%s Pick #%d resolved: %s %s → %s (%s)",
+                emoji, pick.id, extract_handle(pick.home),
+                f"vs {extract_handle(pick.away)}", outcome.value,
+                pick.profit_display,
+            )
+
+        if resolved:
+            console.print(
+                f"  [dim]Resolved {len(resolved)} pick(s): "
+                f"{sum(1 for p in resolved if p.result == PickResult.WIN)}W "
+                f"{sum(1 for p in resolved if p.result == PickResult.LOSS)}L "
+                f"{sum(1 for p in resolved if p.result == PickResult.PUSH)}P[/dim]"
+            )
+
+        return resolved
+
+    def _find_match_result(self, pick: TrackedPick) -> MatchResult | None:
+        """Find the completed match result for a tracked pick."""
+        home_handle = extract_handle(pick.home)
+        away_handle = extract_handle(pick.away)
+        h2h = self.db.get_h2h_matches(home_handle, away_handle, limit=5)
+
+        for match in h2h:
+            # Match by start_time (within 5 min tolerance for cross-source variance)
+            if abs(match.start_time - pick.start_time) <= 300:
+                return match
+        return None
+
+    @staticmethod
+    def _evaluate_pick(
+        pick: TrackedPick, result: MatchResult
+    ) -> tuple[PickResult, float]:
+        """Determine if a pick won or lost and calculate profit.
+
+        Returns (outcome, profit_in_units).
+        """
+        market = pick.market
+        total_goals = result.total_goals
+
+        parsed_line = _parse_line(market)
+        parsed_spread = _parse_spread(market)
+
+        won = False
+
+        if parsed_line:
+            direction, line = parsed_line
+            if direction.lower() == "over":
+                won = total_goals > line
+            else:
+                won = total_goals < line
+        elif parsed_spread:
+            player_name, handicap = parsed_spread
+            # Determine which side the pick is on
+            pick_handle = player_name.lower()
+            home_handle = extract_handle(pick.home).lower()
+            away_handle = extract_handle(pick.away).lower()
+
+            if home_handle in pick_handle or pick_handle in home_handle:
+                goal_diff = result.home_score - result.away_score
+            elif away_handle in pick_handle or pick_handle in away_handle:
+                goal_diff = result.away_score - result.home_score
+            else:
+                # Can't determine side — skip
+                return PickResult.PUSH, 0.0
+
+            adjusted = goal_diff + handicap
+            if adjusted > 0:
+                won = True
+            elif adjusted == 0:
+                return PickResult.PUSH, 0.0
+            else:
+                won = False
+        elif "win" in market.lower():
+            # Moneyline win market — extract player name
+            market_lower = market.lower()
+            home_handle = extract_handle(pick.home).lower()
+            away_handle = extract_handle(pick.away).lower()
+
+            if home_handle in market_lower or pick.home.lower() in market_lower:
+                won = result.home_score > result.away_score
+            elif away_handle in market_lower or pick.away.lower() in market_lower:
+                won = result.away_score > result.home_score
+            else:
+                return PickResult.PUSH, 0.0
+
+            # Draw is a loss for win markets
+            if result.is_draw:
+                won = False
+        else:
+            # Unknown market type — can't evaluate
+            return PickResult.PUSH, 0.0
+
+        if won:
+            payout = (pick.odds - 1.0) * pick.units if pick.odds else pick.units
+            return PickResult.WIN, round(payout, 2)
+        else:
+            return PickResult.LOSS, round(-pick.units, 2)
 
     async def backfill(self) -> None:
         """Fetch historical match data to populate the database on first run.
@@ -167,6 +335,9 @@ class EsporfBot:
                     logger.info("Added %d new results for league %d", added, lid)
             except Exception as e:
                 logger.warning("Failed to fetch ended matches for league %d: %s", lid, e)
+
+        # Resolve any pending picks now that we have fresh results
+        self.resolve_pending_picks()
 
         # Fetch external data (TotalCorner + Forebet) in parallel
         await self._fetch_external_data()
@@ -487,6 +658,7 @@ class EsporfBot:
                 await send_alerts(new_reports)
                 for r in new_reports:
                     self._alerted_keys.add(_match_key(r.match))
+                    self.record_pick(r)
 
         return reports_with_picks
 

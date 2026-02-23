@@ -20,7 +20,7 @@ from esporf.alerts.webhooks import _build_discord_embed, _confidence_color
 from esporf.bot import EsporfBot, _match_key
 from esporf.config import settings
 from esporf.database import MatchDatabase
-from esporf.models import MatchupReport, league_display_name
+from esporf.models import MatchupReport, PickResult, TrackedPick, extract_handle, league_display_name
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +145,7 @@ class EsporfDiscordBot(discord.Client):
             try:
                 await self._alert_channel.send(content=content or None, embed=embed)
                 self.scanner._alerted_keys.add(_match_key(report.match))
+                self.scanner.record_pick(report)
                 logger.info("Alert sent for %s", report.match.display_name)
             except Exception as e:
                 logger.warning("Failed to send alert: %s", e)
@@ -244,6 +245,120 @@ def _register_commands(bot: EsporfDiscordBot) -> None:
             description="\n".join(lines),
             color=0x2ECC71,
         )
+        await interaction.response.send_message(embed=embed)
+
+    @bot.tree.command(name="record", description="Show betting record, profit, and ROI")
+    @app_commands.describe(league="Filter by league (optional)")
+    @app_commands.choices(league=[
+        app_commands.Choice(name="All Leagues", value=0),
+        app_commands.Choice(name="GG League", value=42648),
+        app_commands.Choice(name="GT Leagues", value=42649),
+        app_commands.Choice(name="Volta", value=38439),
+    ])
+    async def cmd_record(
+        interaction: discord.Interaction,
+        league: app_commands.Choice[int] | None = None,
+    ) -> None:
+        db = bot.scanner.db
+        league_id = league.value if league and league.value != 0 else None
+        summary = db.get_pick_summary(league_id=league_id)
+
+        wins = summary["wins"]
+        losses = summary["losses"]
+        pushes = summary["pushes"]
+        pending = summary["pending"]
+        total = summary["total"]
+        profit = summary["profit"]
+        wagered = summary["units_wagered"]
+
+        if total == 0 and pending == 0:
+            await interaction.response.send_message(
+                "No picks tracked yet. Picks are recorded when alerts are sent.",
+                ephemeral=True,
+            )
+            return
+
+        roi = (profit / wagered * 100) if wagered > 0 else 0.0
+        profit_sign = "+" if profit >= 0 else ""
+
+        title = "Betting Record"
+        if league and league.value != 0:
+            title += f" — {league.name}"
+
+        lines = [
+            f"## {wins}W - {losses}L" + (f" - {pushes}P" if pushes else ""),
+            "",
+            f"**Profit:** {profit_sign}{profit:.2f}u",
+            f"**ROI:** {profit_sign}{roi:.1f}%",
+            f"**Units Wagered:** {wagered:.1f}u",
+        ]
+
+        if pending:
+            lines.append(f"**Pending:** {pending} pick(s)")
+
+        # Win rate
+        if total > 0:
+            win_rate = wins / total * 100
+            lines.append(f"**Win Rate:** {win_rate:.1f}%")
+
+        color = 0x2ECC71 if profit >= 0 else 0xED4245  # green if profitable, red if not
+
+        embed = discord.Embed(
+            title=title,
+            description="\n".join(lines),
+            color=color,
+        )
+        await interaction.response.send_message(embed=embed)
+
+    @bot.tree.command(name="results", description="Show recent pick results")
+    @app_commands.describe(count="Number of recent picks to show (default 10)")
+    async def cmd_results(
+        interaction: discord.Interaction,
+        count: int = 10,
+    ) -> None:
+        db = bot.scanner.db
+        count = min(max(count, 1), 25)  # clamp between 1-25
+        picks = db.get_all_picks(limit=count)
+
+        if not picks:
+            await interaction.response.send_message(
+                "No picks tracked yet.", ephemeral=True,
+            )
+            return
+
+        lines = []
+        for p in picks:
+            home_h = extract_handle(p.home)
+            away_h = extract_handle(p.away)
+            score = p.score_str or "pending"
+            emoji = p.result_emoji
+            league_name = league_display_name(p.league_id)
+
+            odds_str = f" @ {p.odds:.2f}" if p.odds else ""
+            profit_str = f" ({p.profit_display})" if p.is_resolved else ""
+
+            lines.append(
+                f"{emoji} **{home_h}** vs **{away_h}** [{score}]\n"
+                f"\u2003{p.market} {p.units:.1f}u{odds_str}{profit_str}\n"
+                f"\u2003*{league_name}* — <t:{p.start_time}:d>"
+            )
+
+        embed = discord.Embed(
+            title=f"Recent Picks ({len(picks)})",
+            description="\n\n".join(lines),
+            color=0x3498DB,
+        )
+
+        # Add summary footer
+        summary = db.get_pick_summary()
+        total = summary["total"]
+        if total > 0:
+            profit = summary["profit"]
+            sign = "+" if profit >= 0 else ""
+            embed.set_footer(
+                text=f"Overall: {summary['wins']}W-{summary['losses']}L | {sign}{profit:.2f}u profit"
+            )
+
         await interaction.response.send_message(embed=embed)
 
 

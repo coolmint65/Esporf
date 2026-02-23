@@ -12,7 +12,7 @@ import os
 import sqlite3
 
 from esporf.config import settings
-from esporf.models import MatchResult, extract_handle
+from esporf.models import MatchResult, PickResult, TrackedPick, extract_handle
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +30,37 @@ CREATE TABLE IF NOT EXISTS matches (
 );
 """
 
+CREATE_PICKS_TABLE = """
+CREATE TABLE IF NOT EXISTS picks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_id TEXT NOT NULL,
+    league_id INTEGER NOT NULL,
+    home TEXT NOT NULL,
+    away TEXT NOT NULL,
+    start_time INTEGER NOT NULL,
+    market TEXT NOT NULL,
+    units REAL NOT NULL,
+    odds REAL,
+    hit_rate REAL NOT NULL,
+    edge REAL,
+    result TEXT NOT NULL DEFAULT 'pending',
+    profit REAL NOT NULL DEFAULT 0.0,
+    home_score INTEGER,
+    away_score INTEGER,
+    created_at INTEGER NOT NULL,
+    resolved_at INTEGER
+);
+"""
+
 CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_matches_home ON matches(home);",
     "CREATE INDEX IF NOT EXISTS idx_matches_away ON matches(away);",
     "CREATE INDEX IF NOT EXISTS idx_matches_league ON matches(league_id);",
     "CREATE INDEX IF NOT EXISTS idx_matches_time ON matches(start_time DESC);",
     "CREATE INDEX IF NOT EXISTS idx_matches_home_away ON matches(home, away);",
+    "CREATE INDEX IF NOT EXISTS idx_picks_result ON picks(result);",
+    "CREATE INDEX IF NOT EXISTS idx_picks_time ON picks(created_at DESC);",
+    "CREATE INDEX IF NOT EXISTS idx_picks_league ON picks(league_id);",
 ]
 
 
@@ -57,6 +82,7 @@ class MatchDatabase:
     def _ensure_schema(self) -> None:
         conn = self._get_conn()
         conn.execute(CREATE_TABLE)
+        conn.execute(CREATE_PICKS_TABLE)
         for idx_sql in CREATE_INDEXES:
             conn.execute(idx_sql)
         conn.commit()
@@ -238,6 +264,137 @@ class MatchDatabase:
             "SELECT COUNT(*) as cnt FROM matches WHERE league_id = ?", (league_id,)
         ).fetchone()
         return row["cnt"]
+
+    # ── Pick tracking ────────────────────────────────────────────────
+
+    def insert_pick(self, pick: TrackedPick) -> int:
+        """Insert a tracked pick. Returns the new row ID."""
+        conn = self._get_conn()
+        cur = conn.execute(
+            """INSERT INTO picks
+               (match_id, league_id, home, away, start_time, market, units,
+                odds, hit_rate, edge, result, profit, home_score, away_score,
+                created_at, resolved_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                pick.match_id, pick.league_id, pick.home, pick.away,
+                pick.start_time, pick.market, pick.units,
+                pick.odds, pick.hit_rate, pick.edge,
+                pick.result.value, pick.profit, pick.home_score,
+                pick.away_score, pick.created_at, pick.resolved_at,
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+    def get_pending_picks(self) -> list[TrackedPick]:
+        """Get all picks awaiting resolution."""
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT * FROM picks WHERE result = 'pending' ORDER BY start_time ASC"
+        ).fetchall()
+        return [self._row_to_pick(r) for r in rows]
+
+    def resolve_pick(
+        self, pick_id: int, result: PickResult, profit: float,
+        home_score: int, away_score: int, resolved_at: int,
+    ) -> None:
+        """Update a pick with its outcome."""
+        conn = self._get_conn()
+        conn.execute(
+            """UPDATE picks
+               SET result = ?, profit = ?, home_score = ?, away_score = ?,
+                   resolved_at = ?
+               WHERE id = ?""",
+            (result.value, profit, home_score, away_score, resolved_at, pick_id),
+        )
+        conn.commit()
+
+    def get_all_picks(
+        self, limit: int = 100, league_id: int | None = None
+    ) -> list[TrackedPick]:
+        """Get picks ordered by most recent first."""
+        conn = self._get_conn()
+        if league_id:
+            rows = conn.execute(
+                """SELECT * FROM picks WHERE league_id = ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (league_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM picks ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._row_to_pick(r) for r in rows]
+
+    def get_pick_summary(
+        self, league_id: int | None = None
+    ) -> dict[str, int | float]:
+        """Get aggregate W/L/P stats and profit.
+
+        Returns dict with keys: wins, losses, pushes, pending,
+        total, profit, units_wagered.
+        """
+        conn = self._get_conn()
+        if league_id:
+            rows = conn.execute(
+                "SELECT result, profit, units FROM picks WHERE league_id = ?",
+                (league_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT result, profit, units FROM picks"
+            ).fetchall()
+
+        wins = losses = pushes = pending = 0
+        total_profit = 0.0
+        units_wagered = 0.0
+
+        for r in rows:
+            units_wagered += r["units"]
+            total_profit += r["profit"]
+            match r["result"]:
+                case "win":
+                    wins += 1
+                case "loss":
+                    losses += 1
+                case "push":
+                    pushes += 1
+                case "pending":
+                    pending += 1
+
+        return {
+            "wins": wins,
+            "losses": losses,
+            "pushes": pushes,
+            "pending": pending,
+            "total": wins + losses + pushes,
+            "profit": total_profit,
+            "units_wagered": units_wagered,
+        }
+
+    @staticmethod
+    def _row_to_pick(row: sqlite3.Row) -> TrackedPick:
+        return TrackedPick(
+            id=row["id"],
+            match_id=row["match_id"],
+            league_id=row["league_id"],
+            home=row["home"],
+            away=row["away"],
+            start_time=row["start_time"],
+            market=row["market"],
+            units=row["units"],
+            odds=row["odds"],
+            hit_rate=row["hit_rate"],
+            edge=row["edge"],
+            result=PickResult(row["result"]),
+            profit=row["profit"],
+            home_score=row["home_score"],
+            away_score=row["away_score"],
+            created_at=row["created_at"],
+            resolved_at=row["resolved_at"],
+        )
 
     # ── Helpers ──────────────────────────────────────────────────────
 

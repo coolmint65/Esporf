@@ -186,6 +186,67 @@ def league_display_name(league_id: int) -> str:
     return _LEAGUE_DISPLAY_NAMES.get(league_id, f"League {league_id}")
 
 
+class PickResult(Enum):
+    """Outcome of a tracked bet pick."""
+
+    PENDING = "pending"
+    WIN = "win"
+    LOSS = "loss"
+    PUSH = "push"
+
+
+@dataclass
+class TrackedPick:
+    """A bet pick that has been alerted, tracked for W/L resolution.
+
+    Created when a pick is sent as an alert. Updated once the match
+    ends and the result is known.
+    """
+
+    match_id: str
+    league_id: int
+    home: str
+    away: str
+    start_time: int
+    market: str  # "Over 5.5 Goals", "Player -0.5", etc.
+    units: float
+    odds: float | None  # decimal odds at time of pick
+    hit_rate: float
+    edge: float | None
+    result: PickResult = PickResult.PENDING
+    profit: float = 0.0
+    home_score: int | None = None
+    away_score: int | None = None
+    created_at: int = 0
+    resolved_at: int | None = None
+    id: int | None = None  # DB primary key
+
+    @property
+    def is_resolved(self) -> bool:
+        return self.result != PickResult.PENDING
+
+    @property
+    def result_emoji(self) -> str:
+        return {
+            PickResult.WIN: "\u2705",
+            PickResult.LOSS: "\u274c",
+            PickResult.PUSH: "\u2796",
+            PickResult.PENDING: "\u23f3",
+        }[self.result]
+
+    @property
+    def profit_display(self) -> str:
+        if self.profit >= 0:
+            return f"+{self.profit:.2f}u"
+        return f"{self.profit:.2f}u"
+
+    @property
+    def score_str(self) -> str | None:
+        if self.home_score is not None and self.away_score is not None:
+            return f"{self.home_score}-{self.away_score}"
+        return None
+
+
 class League(Enum):
     """Tracked eSoccer leagues with BetsAPI league IDs (2025 season)."""
 
