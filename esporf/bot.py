@@ -492,13 +492,11 @@ class EsporfBot:
 
     async def _interruptible_sleep(self, seconds: int) -> None:
         """Sleep in 1-second ticks so Ctrl+C / _shutdown() takes effect immediately."""
-        for remaining in range(seconds, 0, -1):
+        console.print(f"[dim]Next scan in {seconds}s...[/dim]")
+        for _ in range(seconds):
             if not self._running:
                 return
-            # Overwrite the same line with a countdown
-            console.print(f"\r[dim]Next scan in {remaining}s...[/dim]", end="")
             await asyncio.sleep(1)
-        console.print()  # newline after countdown
 
     def _shutdown(self) -> None:
         console.print("\n[yellow]Shutting down...[/yellow]")
