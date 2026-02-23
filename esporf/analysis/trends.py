@@ -18,7 +18,14 @@ import logging
 
 from esporf.config import settings
 from esporf.database import MatchDatabase
-from esporf.models import MatchResult, MatchupReport, Trend, UpcomingMatch, _poisson_over_prob
+from esporf.models import (
+    MONEYLINE_ONLY_LEAGUES,
+    MatchResult,
+    MatchupReport,
+    Trend,
+    UpcomingMatch,
+    _poisson_over_prob,
+)
 from esporf.sources.forebet import ForebetPrediction
 from esporf.sources.totalcorner import LeagueStats
 
@@ -55,7 +62,14 @@ class TrendAnalyzer:
         )
 
         # Determine which goal lines to analyze
-        if match.odds and match.odds.has_data:
+        if match.league_id in MONEYLINE_ONLY_LEAGUES:
+            # GT Leagues — sportsbooks don't offer O/U goals, moneyline only
+            check_lines = []
+            logger.debug(
+                "League %s is moneyline-only — skipping O/U lines for %s vs %s",
+                match.league_id, match.home, match.away,
+            )
+        elif match.odds and match.odds.has_data:
             check_lines = sorted(match.odds.available_lines)
         else:
             check_lines = sorted(settings.volta_book_line_values)

@@ -159,6 +159,13 @@ class League(Enum):
         return league_display_name(self.value)
 
 
+# Leagues where sportsbooks only offer moneyline (1X2) — no Over/Under goals
+MONEYLINE_ONLY_LEAGUES: set[int] = {
+    League.GT_LEAGUES_12MIN.value,  # 42649
+    23114,                          # GT Leagues (legacy ID)
+}
+
+
 @dataclass
 class MatchResult:
     """A completed eSoccer match with final scores."""
