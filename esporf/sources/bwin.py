@@ -10,9 +10,9 @@ We try to extract it automatically from the page; if that fails, fall
 back to a manually configured token in ``.env``.
 
 Endpoint:
-    https://cds-api.bwin.com/bettingoffer/fixtures
+    https://www.bwin.com/cds-api/bettingoffer/fixtures
     ?x-bwin-accessid={token}
-    &lang=en&country=GB&userCountry=GB
+    &lang=en&country=US&userCountry=US
     &sportIds=108          ← eSoccer
     &fixtureTypes=Standard
     &state=Latest
@@ -41,8 +41,8 @@ logger = logging.getLogger(__name__)
 # bwin sport ID for eSoccer
 _SPORT_ID = 108
 
-# CDS API base — region can vary (bwin.com, bwin.fr, bwin.de …)
-_CDS_BASE = "https://cds-api.bwin.com"
+# CDS API base — use bwin.com proxied path (direct cds-api.bwin.com blocks non-browser)
+_CDS_BASE = "https://www.bwin.com/cds-api"
 
 # How long a fetched token stays valid before we refresh (30 min)
 _TOKEN_TTL = 1800
@@ -192,8 +192,8 @@ class BwinClient:
         params = {
             "x-bwin-accessid": token,
             "lang": "en",
-            "country": "GB",
-            "userCountry": "GB",
+            "country": "US",
+            "userCountry": "US",
             "sportIds": str(_SPORT_ID),
             "fixtureTypes": "Standard",
             "state": "Latest",
@@ -228,7 +228,8 @@ class BwinClient:
             data = resp.json()
 
         except Exception as e:
-            logger.warning("bwin: odds fetch failed: %s", e)
+            self._gave_up = True
+            logger.warning("bwin: odds fetch failed: %s. Skipping bwin for this session.", e)
             return []
 
         fixtures = data.get("fixtures", [])
