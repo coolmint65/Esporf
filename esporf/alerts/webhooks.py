@@ -40,6 +40,14 @@ def _build_discord_embed(report: MatchupReport) -> dict:
     if not pick:
         return {}
 
+    # Hard guard — never build an embed for a non-tracked league
+    if match.league_id not in set(settings.tracked_league_ids):
+        logger.warning(
+            "Blocked embed for non-tracked league %d (%s)",
+            match.league_id, match.display_name,
+        )
+        return {}
+
     league = match.league
     league_name = league.display_name if league else f"League {match.league_id}"
     ts = match.start_time
@@ -97,8 +105,17 @@ async def send_discord_alert(reports: list[MatchupReport]) -> None:
 
 
 async def send_alerts(reports: list[MatchupReport]) -> None:
-    """Send alerts through Discord."""
-    reports_with_trends = [r for r in reports if r.has_trends]
+    """Send alerts through Discord.
+
+    Only sends alerts for matches belonging to a tracked league —
+    this is the final gate that prevents GT Leagues / GG League
+    alerts from reaching Discord even if upstream filters miss them.
+    """
+    tracked = set(settings.tracked_league_ids)
+    reports_with_trends = [
+        r for r in reports
+        if r.has_trends and r.match.league_id in tracked
+    ]
     if not reports_with_trends:
         return
 
