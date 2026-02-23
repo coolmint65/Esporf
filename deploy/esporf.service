@@ -1,14 +1,15 @@
 [Unit]
-Description=Esporf Esports Trend Bot
-After=network.target
+Description=Esporf Esports Trend Bot (Docker)
+After=network.target docker.service
+Requires=docker.service
 
 [Service]
 Type=simple
 WorkingDirectory=/opt/esporf
-ExecStart=/opt/esporf/.venv/bin/esporf run
+ExecStart=/usr/bin/docker compose up --build
+ExecStop=/usr/bin/docker compose down
 Restart=always
 RestartSec=10
-User=esporf
 
 # Hardening
 NoNewPrivileges=true

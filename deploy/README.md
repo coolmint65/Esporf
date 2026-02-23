@@ -1,5 +1,95 @@
 # Deploying Esporf 24/7
 
+## VPS Recommendations
+
+Any cheap Linux VPS will work — Esporf is lightweight (< 100 MB RAM, negligible CPU).
+
+| Provider | Cheapest plan | Notes |
+|----------|---------------|-------|
+| **Hetzner** | ~$4/mo (CX22) | Best value, EU & US datacenters |
+| **DigitalOcean** | $6/mo (Basic) | Simple UI, good docs |
+| **Linode (Akamai)** | $5/mo (Nanode) | Solid, straightforward |
+| **Vultr** | $5/mo (Cloud) | Many datacenter locations |
+| **Oracle Cloud** | Free tier (ARM) | Free forever, 1 GB RAM is plenty |
+
+Pick **Ubuntu 22.04+** or **Debian 12+** as the OS.
+
+---
+
+## Linux VPS (Docker — Recommended)
+
+### Automated setup
+
+SSH into your VPS and run:
+
+```bash
+git clone https://github.com/coolmint65/Esporf.git /opt/esporf
+sudo bash /opt/esporf/deploy/setup.sh
+```
+
+This installs Docker, clones the repo, sets up the systemd service, and creates your `.env` file.
+
+Then configure and start:
+
+```bash
+sudo nano /opt/esporf/.env          # fill in your API keys
+sudo systemctl start esporf         # start the bot
+```
+
+### Manual setup
+
+```bash
+# 1. Install Docker
+curl -fsSL https://get.docker.com | sh
+sudo systemctl enable --now docker
+
+# 2. Clone
+git clone https://github.com/coolmint65/Esporf.git /opt/esporf
+cd /opt/esporf
+
+# 3. Configure
+cp .env.example .env
+nano .env
+
+# 4. Start with Docker Compose
+sudo docker compose up -d --build
+
+# 5. (Optional) Install systemd service for auto-start on boot
+sudo cp deploy/esporf.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now esporf
+```
+
+### Managing the service
+
+```bash
+sudo systemctl status esporf       # check status
+sudo systemctl restart esporf      # restart (e.g. after config change)
+sudo systemctl stop esporf         # stop
+
+# Logs
+sudo docker compose -f /opt/esporf/docker-compose.yml logs -f
+sudo journalctl -u esporf -f
+```
+
+### Updating
+
+```bash
+cd /opt/esporf
+git pull
+sudo systemctl restart esporf      # rebuilds the container automatically
+```
+
+### Running the Discord bot instead
+
+Edit `docker-compose.yml` and uncomment the `esporf-discord` service, then comment out or remove the default `esporf` service. Restart:
+
+```bash
+sudo systemctl restart esporf
+```
+
+---
+
 ## Windows 10/11
 
 ### 1. Clone and install
@@ -34,55 +124,3 @@ schtasks /delete /tn "Esporf Bot" /f :: remove
 ```
 
 You can also manage it in **Task Scheduler** (search for it in the Start menu, look for "Esporf Bot" in the task list).
-
----
-
-## Linux VPS (DigitalOcean, Hetzner, etc.)
-
-### 1. Clone and install
-
-```bash
-git clone https://github.com/coolmint65/Esporf.git /opt/esporf
-cd /opt/esporf
-python3 -m venv .venv
-.venv/bin/pip install -e .
-```
-
-### 2. Configure
-
-```bash
-cp .env.example .env   # or copy your existing .env
-nano .env              # fill in your API keys
-```
-
-### 3. Install the systemd service
-
-```bash
-sudo useradd -r -s /usr/sbin/nologin esporf
-sudo chown -R esporf:esporf /opt/esporf
-sudo cp deploy/esporf.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable esporf   # start on boot
-sudo systemctl start esporf    # start now
-```
-
-### 4. Verify
-
-```bash
-sudo systemctl status esporf   # check it's running
-sudo journalctl -u esporf -f   # live logs
-```
-
-## What you get
-
-- **Auto-restart**: if the bot crashes, systemd restarts it in 10 seconds
-- **Boot survival**: starts automatically after a server reboot
-- **Logs**: `journalctl -u esporf` for full history
-
-## Managing the service
-
-```bash
-sudo systemctl stop esporf      # stop
-sudo systemctl restart esporf   # restart (e.g. after config change)
-sudo systemctl status esporf    # check status
-```
