@@ -310,7 +310,13 @@ def _parse_event_odds(offers: list[dict]) -> MatchOdds | None:
                 elif oc_type == "OT_UNDER" or "under" in oc.get("label", "").lower():
                     under_odds = dec_odds
 
-            if line_val is not None and over_odds and under_odds and line_val not in seen_lines:
+            if (
+                line_val is not None
+                and over_odds
+                and under_odds
+                and round(line_val % 1, 2) == 0.5
+                and line_val not in seen_lines
+            ):
                 seen_lines.add(line_val)
                 total_lines.append(OddsLine(
                     line=line_val,

@@ -656,9 +656,9 @@ class BetsAPIClient:
         The handicap can be a compound Asian total like "3.5,4.0" — we split
         those into individual lines so each can be matched to trend data.
 
-        All valid positive lines are accepted (.5, whole numbers, quarter
-        lines).  The trend analysis handles any line value — it checks the
-        historical hit rate at that specific threshold.
+        Only .5 lines (1.5, 2.5, 3.5 …) are accepted — quarter lines
+        (.25, .75) and whole numbers are skipped as sportsbooks only
+        offer .5 totals for goals.
         """
         results: list[OddsLine] = []
         try:
@@ -674,7 +674,7 @@ class BetsAPIClient:
                 if not part:
                     continue
                 line = float(part)
-                if line > 0:
+                if line > 0 and round(line % 1, 2) == 0.5:
                     results.append(OddsLine(line=line, over_odds=over, under_odds=under))
         except (ValueError, TypeError):
             pass
