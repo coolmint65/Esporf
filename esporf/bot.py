@@ -16,6 +16,7 @@ import asyncio
 import logging
 import os
 import signal
+import sys
 import time
 from datetime import datetime
 
@@ -440,6 +441,13 @@ class EsporfBot:
         self._running = True
         interval = settings.poll_interval
 
+        # Warn if the poll interval is suspiciously high — likely a stale .env
+        if interval > 30:
+            console.print(
+                f"[bold yellow]Warning: POLL_INTERVAL={interval}s (from .env or env var). "
+                f"Recommended: 20s. Update POLL_INTERVAL in your .env file.[/bold yellow]\n"
+            )
+
         console.print(
             f"[bold blue]Esporf Odds Bot Starting[/bold blue]\n"
             f"  Tracking leagues: {settings.league_ids}\n"
@@ -491,12 +499,24 @@ class EsporfBot:
             console.print("\n[bold]Bot stopped.[/bold]")
 
     async def _interruptible_sleep(self, seconds: int) -> None:
-        """Sleep in 1-second ticks so Ctrl+C / _shutdown() takes effect immediately."""
-        console.print(f"[dim]Next scan in {seconds}s...[/dim]")
-        for _ in range(seconds):
+        """Sleep with an in-place countdown that updates every 5 seconds.
+
+        Uses raw stdout with carriage return so the line updates in place
+        on all terminals including Windows CMD.
+        """
+        for remaining in range(seconds, 0, -1):
             if not self._running:
+                sys.stdout.write("\r" + " " * 40 + "\r")
+                sys.stdout.flush()
                 return
+            # Update the countdown every 5 seconds (and on first tick)
+            if remaining == seconds or remaining % 5 == 0:
+                sys.stdout.write(f"\rNext scan in {remaining}s...   ")
+                sys.stdout.flush()
             await asyncio.sleep(1)
+        # Clear the countdown line when done
+        sys.stdout.write("\r" + " " * 40 + "\r")
+        sys.stdout.flush()
 
     def _shutdown(self) -> None:
         console.print("\n[yellow]Shutting down...[/yellow]")
