@@ -130,6 +130,23 @@ class MatchOdds:
         return len(self.total_lines) > 0 or self.moneyline is not None
 
 
+# Display names for all known league IDs (current + legacy)
+_LEAGUE_DISPLAY_NAMES: dict[int, str] = {
+    # 2025 season (current)
+    42648: "GG League",
+    42649: "GT Leagues",
+    38439: "Volta",
+    # Legacy IDs (may still appear in old DB records or BetsAPI responses)
+    37298: "GG League",
+    23114: "GT Leagues",
+}
+
+
+def league_display_name(league_id: int) -> str:
+    """Get the display name for any league ID (current or legacy)."""
+    return _LEAGUE_DISPLAY_NAMES.get(league_id, f"League {league_id}")
+
+
 class League(Enum):
     """Tracked eSoccer leagues with BetsAPI league IDs (2025 season)."""
 
@@ -139,12 +156,7 @@ class League(Enum):
 
     @property
     def display_name(self) -> str:
-        names = {
-            42648: "Esoccer Battle 8min",
-            42649: "GT Leagues 12min",
-            38439: "Volta",
-        }
-        return names.get(self.value, f"League {self.value}")
+        return league_display_name(self.value)
 
 
 @dataclass
@@ -415,7 +427,7 @@ class BetPick:
             u += 0.25
 
         # Snap DOWN to the nearest allowed tier (conservative)
-        tiers = [1.0, 1.25, 1.5, 1.75, 2.0, 3.0]
+        tiers = [1.0, 1.5, 2.0, 2.5, 3.0]
         return max(t for t in tiers if t <= u)
 
     @property

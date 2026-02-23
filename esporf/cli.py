@@ -196,7 +196,7 @@ def _h2h_lookup(player_a: str, player_b: str) -> None:
 def _db_stats() -> None:
     from esporf.config import settings
     from esporf.database import MatchDatabase
-    from esporf.models import League
+    from esporf.models import league_display_name
 
     db = MatchDatabase()
     try:
@@ -205,10 +205,7 @@ def _db_stats() -> None:
         console.print(f"  Total matches: {total:,}")
         for lid in settings.tracked_league_ids:
             count = db.total_matches_for_league(lid)
-            try:
-                name = League(lid).display_name
-            except ValueError:
-                name = f"League {lid}"
+            name = league_display_name(lid)
             console.print(f"  {name}: {count:,}")
         players = db.get_all_players()
         console.print(f"  Unique players: {len(players)}")

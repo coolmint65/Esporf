@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from esporf.config import settings
-from esporf.models import MatchupReport, extract_handle
+from esporf.models import MatchupReport, extract_handle, league_display_name
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +49,7 @@ def _build_discord_embed(report: MatchupReport) -> dict:
         )
         return {}
 
-    league = match.league
-    league_name = league.display_name if league else f"League {match.league_id}"
+    league_name = league_display_name(match.league_id)
     ts = match.start_time
 
     top_rate = max(t.hit_rate for t in pick.supporting_trends)
