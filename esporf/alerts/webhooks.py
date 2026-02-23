@@ -69,10 +69,6 @@ def _build_discord_embed(report: MatchupReport) -> dict:
     away_display = extract_handle(match.away)
 
     if is_trend_only:
-        # Trend-only alert: show fair price so user can compare
-        from esporf.models import _decimal_to_american
-        fair_american = _decimal_to_american(1.0 / top_rate) if top_rate > 0 else "N/A"
-
         lines = [
             f"### {home_display}  vs  {away_display}",
             f"### Kickoff: <t:{ts}:t>  (<t:{ts}:R>)",
@@ -80,9 +76,6 @@ def _build_discord_embed(report: MatchupReport) -> dict:
             f"## {pick.market.upper()}",
             "",
             f"**{top_rate:.0%}** hit rate  ({total_hits}/{total_sample})",
-            f"Fair price: **{fair_american}**  (anything better is +EV)",
-            "",
-            "Check your sportsbook for live odds",
         ]
     else:
         lines = [

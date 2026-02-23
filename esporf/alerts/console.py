@@ -134,8 +134,6 @@ def _display_trend_only_card(
     minutes: int,
 ) -> None:
     """Display a trend-only card when no sportsbook odds are available yet."""
-    from esporf.models import BetPick, _decimal_to_american
-
     match = report.match
     top_rate = max(t.hit_rate for t in pick.supporting_trends)
     total_hits = sum(t.hits for t in pick.supporting_trends)
@@ -144,20 +142,15 @@ def _display_trend_only_card(
     time_tag = f"in {minutes} min"
     color = "green" if top_rate >= 0.80 else "yellow" if top_rate >= 0.70 else "bright_red"
 
-    # Implied fair odds from hit rate
-    fair_american = _decimal_to_american(1.0 / top_rate) if top_rate > 0 else "N/A"
-
     body = (
         f"[bold white]{pick.market.upper()}[/]  [dim](no book odds yet)[/dim]\n"
-        f"[bold]{top_rate:.0%}[/] hit rate  ({total_hits}/{total_sample})\n"
-        f"Fair price: [bold cyan]{fair_american}[/]  (anything better is +EV)"
+        f"[bold]{top_rate:.0%}[/] hit rate  ({total_hits}/{total_sample})"
     )
 
     # Show match context
     context_parts: list[str] = []
     if report.avg_goals is not None:
         context_parts.append(f"Avg: {report.avg_goals:.1f} goals")
-    context_parts.append("Check your sportsbook for odds")
 
     src_types = {t.trend_type for t in pick.supporting_trends}
     ext_labels = []

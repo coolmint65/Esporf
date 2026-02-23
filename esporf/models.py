@@ -498,57 +498,74 @@ class MatchupReport:
     ) -> BetPick | None:
         """Pick the best trend using only historical data — no real odds needed.
 
-        Ranks by agreement × hit rate, restricted to lines that Volta books
-        typically offer. Includes implied fair odds in the reason string so
-        the user knows what price represents +EV.
+        Strategy: pick the **tightest line** (highest number) that still
+        meets the hit rate threshold. Low lines like O2.5 at 95% are
+        useless — no sportsbook offers a reasonable price on a near-certainty.
+        Tighter lines (O3.5 at 78%, O4.5 at 65%) are where real value lives
+        because the book will actually offer bettable odds.
+
+        Only considers lines the book typically offers (volta_book_lines).
+        Requires at least the configured min_hit_rate to qualify.
         """
-        best_market: str | None = None
-        best_score = 0.0
-        best_trends: list[Trend] = []
+        from esporf.config import settings
+        min_rate = settings.min_hit_rate
+
+        # Collect qualifying lines, then pick the tightest one
+        candidates: list[tuple[float, str, list[Trend]]] = []
 
         for market, trends in market_groups.items():
             parsed = _parse_line(market)
             if not parsed:
-                continue  # skip non-line markets (Win/Draw) without odds
+                continue
 
             direction, line = parsed
             if line not in book_lines:
-                continue  # only recommend lines the book actually offers
+                continue
 
             agreement = len(trends)
             avg_rate = sum(t.hit_rate for t in trends) / agreement
-            avg_sample = sum(t.sample_size for t in trends) / agreement
 
-            # Score: 40% hit rate, 30% agreement, 30% sample size
-            score = (
-                avg_rate * 0.40
-                + min(agreement / 5, 1.0) * 0.30
-                + min(avg_sample / 20, 1.0) * 0.30
-            )
+            if avg_rate < min_rate:
+                continue
 
-            if score > best_score:
-                best_score = score
-                best_market = market
-                best_trends = trends
+            # Must have multiple sources or strong sample to recommend
+            if agreement < 2:
+                avg_sample = sum(t.sample_size for t in trends) / agreement
+                if avg_sample < 15:
+                    continue
 
-        if best_market is None:
+            candidates.append((line, market, trends))
+
+        if not candidates:
             return None
+
+        # Pick the tightest line (highest number) — that's where books
+        # will offer real odds and where our edge is most exploitable
+        candidates.sort(key=lambda c: c[0], reverse=True)
+        best_line, best_market, best_trends = candidates[0]
 
         top_rate = max(t.hit_rate for t in best_trends)
         sources = ", ".join(sorted({_trend_source_label(t.trend_type) for t in best_trends}))
 
-        # Calculate implied fair odds from hit rate
-        fair_american = _decimal_to_american(1.0 / top_rate) if top_rate > 0 else "N/A"
+        # Confidence score for unit sizing (not used for trend-only, but
+        # needed for the BetPick dataclass)
+        agreement = len(best_trends)
+        avg_rate = sum(t.hit_rate for t in best_trends) / agreement
+        avg_sample = sum(t.sample_size for t in best_trends) / agreement
+        confidence = (
+            avg_rate * 0.40
+            + min(agreement / 5, 1.0) * 0.30
+            + min(avg_sample / 20, 1.0) * 0.30
+        )
 
         reason = (
             f"{best_market} backed by {len(best_trends)} trend(s) "
-            f"({sources}) — {top_rate:.0%} hit rate — "
-            f"fair price: {fair_american}"
+            f"({sources}) — {top_rate:.0%} hit rate"
         )
 
         return BetPick(
             market=best_market,
-            confidence=best_score,
+            confidence=confidence,
             supporting_trends=best_trends,
             reason=reason,
             odds_line=None,
