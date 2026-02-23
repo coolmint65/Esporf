@@ -35,7 +35,11 @@ class EsporfDiscordBot(discord.Client):
 
     def __init__(self) -> None:
         intents = discord.Intents.default()
-        super().__init__(intents=intents)
+        activity = discord.Activity(
+            type=discord.ActivityType.watching,
+            name="esoccer odds",
+        )
+        super().__init__(intents=intents, activity=activity, status=discord.Status.online)
         self.tree = app_commands.CommandTree(self)
         self.scanner = EsporfBot(skip_webhook_alerts=True)
         self._alert_channel: discord.TextChannel | None = None
@@ -62,7 +66,23 @@ class EsporfDiscordBot(discord.Client):
     async def on_ready(self) -> None:
         channel_id = settings.discord_channel_id
         if channel_id:
-            ch = self.get_channel(int(channel_id))
+            cid = int(channel_id)
+            # Try cache first, then fall back to an API call.
+            # get_channel can return None when the guild cache hasn't
+            # been populated yet (common on first READY).
+            ch = self.get_channel(cid)
+            if ch is None:
+                try:
+                    ch = await self.fetch_channel(cid)
+                except discord.NotFound:
+                    ch = None
+                except discord.Forbidden:
+                    logger.error(
+                        "Bot lacks permission to access channel %s — "
+                        "check the bot's role in your server",
+                        channel_id,
+                    )
+                    ch = None
             if ch and isinstance(ch, discord.TextChannel):
                 self._alert_channel = ch
                 logger.info("Alert channel: #%s (%s)", ch.name, ch.id)
