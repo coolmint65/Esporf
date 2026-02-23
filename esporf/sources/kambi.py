@@ -51,9 +51,9 @@ _ODDS_CACHE_TTL = 30
 _TIME_TOLERANCE = 600  # 10 minutes
 
 # Map Kambi group IDs → BetsAPI league IDs
-# GT Leagues 12min (2010205703) excluded: only offers 1X2/spread, no O/U totals
 _GROUP_TO_LEAGUE: dict[int, int] = {
     2000124080: 37298,   # Esports Battle (2x4min) → GG League 8min
+    2010205703: 23114,   # eSports Battle (2x6min) → GT Leagues 12min (1X2/spread only)
 }
 
 

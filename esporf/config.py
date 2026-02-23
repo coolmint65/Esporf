@@ -13,8 +13,8 @@ class Settings(BaseSettings):
     betsapi_base_url: str = "https://api.b365api.com/v3"
 
     # League IDs to track
-    # 37298 = GG League 8min, 38439 = Volta 6min
-    league_ids: str = "37298,38439"
+    # 23114 = GT Leagues 12min, 37298 = GG League 8min, 38439 = Volta 6min
+    league_ids: str = "23114,37298,38439"
 
     # Display timezone (e.g. "US/Eastern", "UTC")
     timezone: str = "US/Eastern"
