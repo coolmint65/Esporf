@@ -473,13 +473,18 @@ class MatchupReport:
 
         Used for early alerts when sportsbook odds aren't available yet.
         Only considers lines that Volta books typically offer (2.5, 3.5, 4.5).
-        Calculates implied fair odds from the hit rate so the user can compare
-        against whatever price their sportsbook shows.
+
+        Only fires within 20 minutes of kickoff — far enough ahead to
+        open your sportsbook and place the bet, but not so far that you
+        get flooded with alerts for every match on the schedule.
         """
         if not self.trends:
             return None
         # Don't generate trend-only pick if we already have a real odds pick
         if self.best_bet is not None:
+            return None
+        # Only alert within 20 minutes of kickoff
+        if not self.match.starts_within(1200):
             return None
 
         from esporf.config import settings
