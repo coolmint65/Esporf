@@ -533,6 +533,13 @@ class MatchupReport:
             if avg_rate < min_rate:
                 continue
 
+            # Skip if implied fair odds are too juicy.  If our trend says
+            # 75% hit rate the sportsbook will price it around -300 — no
+            # value laying that much juice.  Cap at -150 (decimal 1.667).
+            implied_dec = 1.0 / avg_rate if avg_rate > 0 else 999.0
+            if implied_dec < 1.667:  # worse than -150
+                continue
+
             # Must have multiple sources or strong sample to recommend
             if agreement < 2:
                 avg_sample = sum(t.sample_size for t in trends) / agreement

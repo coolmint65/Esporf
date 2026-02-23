@@ -68,24 +68,14 @@ def _build_discord_embed(report: MatchupReport) -> dict:
     home_display = extract_handle(match.home)
     away_display = extract_handle(match.away)
 
-    if is_trend_only:
-        lines = [
-            f"### {home_display}  vs  {away_display}",
-            f"### Kickoff: <t:{ts}:t>  (<t:{ts}:R>)",
-            "",
-            f"## {pick.market.upper()}",
-            "",
-            f"**{top_rate:.0%}** hit rate  ({total_hits}/{total_sample})",
-        ]
-    else:
-        lines = [
-            f"### {home_display}  vs  {away_display}",
-            f"### Kickoff: <t:{ts}:t>  (<t:{ts}:R>)",
-            "",
-            f"## {pick.market.upper()}  —  {pick.units_display}",
-            "",
-            f"**{top_rate:.0%}** hit rate  ({total_hits}/{total_sample})",
-        ]
+    lines = [
+        f"### {home_display}  vs  {away_display}",
+        f"### Kickoff: <t:{ts}:t>  (<t:{ts}:R>)",
+        "",
+        f"## {pick.market.upper()}  —  {pick.units_display}",
+        "",
+        f"**{top_rate:.0%}** hit rate  ({total_hits}/{total_sample})",
+    ]
 
     color = _confidence_color(top_rate)
 

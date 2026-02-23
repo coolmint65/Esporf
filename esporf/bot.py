@@ -60,7 +60,7 @@ class EsporfBot:
         self.analyzer = TrendAnalyzer(self.db)
         self._running = False
         self._scan_count = 0
-        self._alerted_match_ids: set[str] = set()
+        self._alerted_keys: set[str] = set()
 
     async def backfill(self) -> None:
         """Fetch historical match data to populate the database on first run."""
@@ -354,14 +354,17 @@ class EsporfBot:
         # Track alerted matches to avoid duplicate alerts. When a trend-only
         # alert is sent first and real odds arrive later, the match won't be
         # re-alerted (the early heads-up is enough).
+        # Uses the content-based _match_key (players + start_time) instead
+        # of match_id, which can change between scans when BetsAPI
+        # cross-references an ace_/esb_ match with a different numeric ID.
         new_reports = [
             r for r in all_alertable
-            if r.match.match_id not in self._alerted_match_ids
+            if _match_key(r.match) not in self._alerted_keys
         ]
         if new_reports:
             await send_alerts(new_reports)
             for r in new_reports:
-                self._alerted_match_ids.add(r.match.match_id)
+                self._alerted_keys.add(_match_key(r.match))
 
         return all_alertable
 
