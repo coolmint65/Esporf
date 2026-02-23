@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Esporf server management shortcut
+# Install: sudo cp /opt/esporf/deploy/esporf /usr/local/bin/esporf
+
+set -euo pipefail
+
+DIR="/opt/esporf"
+
+case "${1:-help}" in
+  start)    systemctl start esporf ;;
+  stop)     systemctl stop esporf ;;
+  restart)  systemctl restart esporf ;;
+  status)   systemctl status esporf ;;
+  logs)     docker compose -f "$DIR/docker-compose.yml" logs -f ;;
+  update)   git -C "$DIR" pull && systemctl restart esporf ;;
+  config)   nano "$DIR/.env" ;;
+  help|*)
+    echo "Usage: esporf <command>"
+    echo ""
+    echo "  start     Start the bot"
+    echo "  stop      Stop the bot"
+    echo "  restart   Restart the bot"
+    echo "  status    Check if the bot is running"
+    echo "  logs      Tail live logs"
+    echo "  update    Pull latest code and restart"
+    echo "  config    Edit .env settings"
+    ;;
+esac

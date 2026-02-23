@@ -60,21 +60,21 @@ systemctl daemon-reload
 systemctl enable esporf
 echo "    Service enabled (will start on boot)."
 
+echo "==> Installing esporf command"
+cp "$INSTALL_DIR/deploy/esporf" /usr/local/bin/esporf
+chmod +x /usr/local/bin/esporf
+echo "    'esporf' command installed."
+
 echo ""
 echo "============================================"
 echo "  Esporf is ready!"
 echo "============================================"
 echo ""
-echo "  1. Edit your config:"
-echo "     nano $INSTALL_DIR/.env"
-echo ""
-echo "  2. Start the bot:"
-echo "     sudo systemctl start esporf"
-echo ""
-echo "  3. Check logs:"
-echo "     sudo docker compose -f $INSTALL_DIR/docker-compose.yml logs -f"
-echo "     (or: sudo journalctl -u esporf -f)"
-echo ""
-echo "  4. Update later:"
-echo "     cd $INSTALL_DIR && git pull && sudo systemctl restart esporf"
+echo "  esporf start     Start the bot"
+echo "  esporf stop      Stop the bot"
+echo "  esporf restart   Restart the bot"
+echo "  esporf status    Check if it's running"
+echo "  esporf logs      Tail live logs"
+echo "  esporf update    Pull latest code and restart"
+echo "  esporf config    Edit .env settings"
 echo ""
