@@ -120,14 +120,18 @@ class EsporfDiscordBot(discord.Client):
             return
 
         tracked = set(settings.tracked_league_ids)
-        new_reports = [
-            r for r in reports
-            if r.best_bet is not None
-            and r.match.league_id in tracked
-            and _match_key(r.match) not in self.scanner._alerted_keys
-        ]
 
-        for report in new_reports:
+        for report in reports:
+            if report.best_bet is None or report.match.league_id not in tracked:
+                continue
+
+            # Check dedup inside the loop so earlier sends in this batch
+            # are caught — the old list-comprehension filter evaluated all
+            # items at once, letting duplicate matches through.
+            key = _match_key(report.match)
+            if key in self.scanner._alerted_keys:
+                continue
+
             embed_data = _build_discord_embed(report)
             if not embed_data:
                 continue
@@ -143,11 +147,15 @@ class EsporfDiscordBot(discord.Client):
                 content = f"<@&{settings.discord_role_id}>"
 
             try:
+                # Add to alerted set BEFORE sending so even if the send
+                # is slow, a concurrent scan won't duplicate it.
+                self.scanner._alerted_keys.add(key)
                 await self._alert_channel.send(content=content or None, embed=embed)
-                self.scanner._alerted_keys.add(_match_key(report.match))
                 self.scanner.record_pick(report)
                 logger.info("Alert sent for %s", report.match.display_name)
             except Exception as e:
+                # Remove from alerted set so it can be retried next cycle
+                self.scanner._alerted_keys.discard(key)
                 logger.warning("Failed to send alert: %s", e)
 
     # ── Cleanup ───────────────────────────────────────────────
