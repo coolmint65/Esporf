@@ -480,8 +480,7 @@ class EsporfBot:
                     console.print(f"[red]Scan error: {e}[/red]")
 
                 if self._running:
-                    console.print(f"[dim]Next scan in {interval}s...[/dim]")
-                    await asyncio.sleep(interval)
+                    await self._interruptible_sleep(interval)
         finally:
             await self.api.close()
             await self.esb.close()
@@ -490,6 +489,16 @@ class EsporfBot:
             await self.forebet.close()
             self.db.close()
             console.print("\n[bold]Bot stopped.[/bold]")
+
+    async def _interruptible_sleep(self, seconds: int) -> None:
+        """Sleep in 1-second ticks so Ctrl+C / _shutdown() takes effect immediately."""
+        for remaining in range(seconds, 0, -1):
+            if not self._running:
+                return
+            # Overwrite the same line with a countdown
+            console.print(f"\r[dim]Next scan in {remaining}s...[/dim]", end="")
+            await asyncio.sleep(1)
+        console.print()  # newline after countdown
 
     def _shutdown(self) -> None:
         console.print("\n[yellow]Shutting down...[/yellow]")
