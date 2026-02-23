@@ -1,16 +1,16 @@
 @echo off
 :: Esporf management shortcut for Windows
-:: Place this file somewhere on your PATH, or run from the project folder
+:: Edit ESPORF_DIR below if your repo is in a different location.
 
-set DIR=%~dp0..
+set ESPORF_DIR=%USERPROFILE%\Esporf
 
-if "%1"=="start"   ( docker compose -f "%DIR%\docker-compose.yml" up -d & goto :eof )
-if "%1"=="stop"    ( docker compose -f "%DIR%\docker-compose.yml" down & goto :eof )
-if "%1"=="restart" ( docker compose -f "%DIR%\docker-compose.yml" down & docker compose -f "%DIR%\docker-compose.yml" up -d & goto :eof )
-if "%1"=="status"  ( docker compose -f "%DIR%\docker-compose.yml" ps & goto :eof )
-if "%1"=="logs"    ( docker compose -f "%DIR%\docker-compose.yml" logs -f & goto :eof )
-if "%1"=="update"  ( git -C "%DIR%" pull & docker compose -f "%DIR%\docker-compose.yml" down & docker compose -f "%DIR%\docker-compose.yml" up -d --build & goto :eof )
-if "%1"=="config"  ( notepad "%DIR%\.env" & goto :eof )
+if "%1"=="start"   ( docker compose -f "%ESPORF_DIR%\docker-compose.yml" up -d & goto :eof )
+if "%1"=="stop"    ( docker compose -f "%ESPORF_DIR%\docker-compose.yml" down & goto :eof )
+if "%1"=="restart" ( docker compose -f "%ESPORF_DIR%\docker-compose.yml" down & docker compose -f "%ESPORF_DIR%\docker-compose.yml" up -d & goto :eof )
+if "%1"=="status"  ( docker compose -f "%ESPORF_DIR%\docker-compose.yml" ps & goto :eof )
+if "%1"=="logs"    ( docker compose -f "%ESPORF_DIR%\docker-compose.yml" logs -f & goto :eof )
+if "%1"=="update"  ( git -C "%ESPORF_DIR%" pull & docker compose -f "%ESPORF_DIR%\docker-compose.yml" down & docker compose -f "%ESPORF_DIR%\docker-compose.yml" up -d --build & goto :eof )
+if "%1"=="config"  ( notepad "%ESPORF_DIR%\.env" & goto :eof )
 
 echo Usage: esporf ^<command^>
 echo.
