@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     betsapi_token: str = ""
     betsapi_base_url: str = "https://api.b365api.com/v3"
 
+    # bwin (eSoccer odds via internal CDS API)
+    bwin_token: str = ""  # x-bwin-accessid — auto-extracted if blank
+
     # League IDs to track
     # 23114 = GT Leagues 12min, 37298 = GG League 8min, 38439 = Volta 6min
     league_ids: str = "38439"

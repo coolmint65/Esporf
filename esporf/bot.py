@@ -28,6 +28,7 @@ from esporf.database import MatchDatabase
 from esporf.models import MatchupReport, UpcomingMatch, extract_handle
 from esporf.sources.aceodds import AceOddsClient
 from esporf.sources.betsapi import BetsAPIClient
+from esporf.sources.bwin import BwinClient
 from esporf.sources.esportsbattle import ESportsBattleClient
 from esporf.sources.forebet import ForebetClient
 from esporf.sources.totalcorner import TotalCornerClient
@@ -54,6 +55,7 @@ class EsporfBot:
         self.api = BetsAPIClient()
         self.esb = ESportsBattleClient()
         self.ace = AceOddsClient()
+        self.bwin = BwinClient()
         self.tc = TotalCornerClient()
         self.forebet = ForebetClient()
         self.db = MatchDatabase()
@@ -298,16 +300,33 @@ class EsporfBot:
             f"{window} — fetching odds...[/dim]"
         )
 
-        # Fetch real odds for BetsAPI-sourced matches only
+        # Fetch real odds — BetsAPI first, then bwin for anything still missing
         betsapi_matches = [
             m for m in all_upcoming
             if not m.match_id.startswith(("esb_", "ace_"))
         ]
         if betsapi_matches:
             await self.api.fetch_odds_batch(betsapi_matches)
+
+        # bwin fills gaps: any match without odds yet gets checked against bwin
+        bwin_count = 0
+        try:
+            bwin_count = await self.bwin.attach_odds(all_upcoming)
+        except Exception as e:
+            logger.debug("bwin odds fetch failed: %s", e)
+
         odds_count = sum(1 for m in all_upcoming if m.odds and m.odds.has_data)
         if odds_count:
-            console.print(f"  [dim]Got odds for {odds_count}/{len(all_upcoming)} matches[/dim]")
+            sources = []
+            betsapi_count = odds_count - bwin_count
+            if betsapi_count > 0:
+                sources.append(f"BetsAPI: {betsapi_count}")
+            if bwin_count > 0:
+                sources.append(f"bwin: {bwin_count}")
+            console.print(
+                f"  [dim]Got odds for {odds_count}/{len(all_upcoming)} "
+                f"matches ({', '.join(sources)})[/dim]"
+            )
 
         # Get Forebet predictions (already cached from _fetch_external_data)
         forebet_preds = await self.forebet.get_predictions()
@@ -379,7 +398,7 @@ class EsporfBot:
             f"  Poll interval: {interval}s\n"
             f"  Schedule: [bold green]AceOdds[/bold green] + ESportsBattle + BetsAPI\n"
             f"  External: [bold cyan]TotalCorner[/bold cyan] + Forebet\n"
-            f"  Odds: BetsAPI v2 → odds/summary → bet365/prematch\n"
+            f"  Odds: BetsAPI (bet365) → [bold magenta]bwin[/bold magenta] fallback\n"
             f"  Min hit rate: {settings.min_hit_rate:.0%}\n"
             f"  Min sample size: {settings.min_sample_size}\n"
             f"  Goal lines: {settings.goal_lines} + book-offered\n"
