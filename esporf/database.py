@@ -329,23 +329,38 @@ class MatchDatabase:
         return [self._row_to_pick(r) for r in rows]
 
     def get_pick_summary(
-        self, league_id: int | None = None
+        self,
+        league_id: int | None = None,
+        since: int | None = None,
+        until: int | None = None,
     ) -> dict[str, int | float]:
         """Get aggregate W/L/P stats and profit.
+
+        Args:
+            league_id: Filter to a specific league.
+            since: Only include picks created at or after this unix timestamp.
+            until: Only include picks created before this unix timestamp.
 
         Returns dict with keys: wins, losses, pushes, pending,
         total, profit, units_wagered.
         """
         conn = self._get_conn()
+        clauses: list[str] = []
+        params: list[int | float] = []
         if league_id:
-            rows = conn.execute(
-                "SELECT result, profit, units FROM picks WHERE league_id = ?",
-                (league_id,),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT result, profit, units FROM picks"
-            ).fetchall()
+            clauses.append("league_id = ?")
+            params.append(league_id)
+        if since is not None:
+            clauses.append("created_at >= ?")
+            params.append(since)
+        if until is not None:
+            clauses.append("created_at < ?")
+            params.append(until)
+
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = conn.execute(
+            f"SELECT result, profit, units FROM picks{where}", params
+        ).fetchall()
 
         wins = losses = pushes = pending = 0
         total_profit = 0.0

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import discord
@@ -247,21 +247,51 @@ def _register_commands(bot: EsporfDiscordBot) -> None:
         )
         await interaction.response.send_message(embed=embed)
 
-    @bot.tree.command(name="record", description="Show betting record, profit, and ROI")
-    @app_commands.describe(league="Filter by league (optional)")
-    @app_commands.choices(league=[
-        app_commands.Choice(name="All Leagues", value=0),
-        app_commands.Choice(name="GG League", value=42648),
-        app_commands.Choice(name="GT Leagues", value=42649),
-        app_commands.Choice(name="Volta", value=38439),
-    ])
-    async def cmd_record(
+    # ── Period profit helpers ─────────────────────────────────
+
+    def _period_bounds(period: str) -> tuple[int, int, str]:
+        """Return (since, until, display_label) for a time period.
+
+        All boundaries use midnight EST.
+        """
+        now = datetime.now(_EST)
+        today_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        if period == "today":
+            since = int(today_midnight.timestamp())
+            until = int((today_midnight + timedelta(days=1)).timestamp())
+            label = today_midnight.strftime("%m/%d/%Y")
+        elif period == "yesterday":
+            yest = today_midnight - timedelta(days=1)
+            since = int(yest.timestamp())
+            until = int(today_midnight.timestamp())
+            label = yest.strftime("%m/%d/%Y")
+        elif period == "weekly":
+            week_start = today_midnight - timedelta(days=today_midnight.weekday())
+            since = int(week_start.timestamp())
+            until = int((today_midnight + timedelta(days=1)).timestamp())
+            label = f"{week_start.strftime('%m/%d')} - {now.strftime('%m/%d')}"
+        elif period == "monthly":
+            month_start = today_midnight.replace(day=1)
+            since = int(month_start.timestamp())
+            until = int((today_midnight + timedelta(days=1)).timestamp())
+            label = now.strftime("%B %Y")
+        else:
+            # all-time
+            since = 0
+            until = int((today_midnight + timedelta(days=1)).timestamp())
+            label = "All Time"
+
+        return since, until, label
+
+    async def _send_profit_embed(
         interaction: discord.Interaction,
-        league: app_commands.Choice[int] | None = None,
+        period: str,
+        title_prefix: str,
     ) -> None:
         db = bot.scanner.db
-        league_id = league.value if league and league.value != 0 else None
-        summary = db.get_pick_summary(league_id=league_id)
+        since, until, label = _period_bounds(period)
+        summary = db.get_pick_summary(since=since, until=until)
 
         wins = summary["wins"]
         losses = summary["losses"]
@@ -273,42 +303,55 @@ def _register_commands(bot: EsporfDiscordBot) -> None:
 
         if total == 0 and pending == 0:
             await interaction.response.send_message(
-                "No picks tracked yet. Picks are recorded when alerts are sent.",
+                f"No picks for {label}.",
                 ephemeral=True,
             )
             return
 
         roi = (profit / wagered * 100) if wagered > 0 else 0.0
-        profit_sign = "+" if profit >= 0 else ""
+        sign = "+" if profit >= 0 else ""
 
-        title = "Betting Record"
-        if league and league.value != 0:
-            title += f" — {league.name}"
+        record_parts = [f"{wins}W", f"{losses}L"]
+        if pushes:
+            record_parts.append(f"{pushes}P")
+        record_str = " - ".join(record_parts)
 
         lines = [
-            f"## {wins}W - {losses}L" + (f" - {pushes}P" if pushes else ""),
-            "",
-            f"**Profit:** {profit_sign}{profit:.2f}u",
-            f"**ROI:** {profit_sign}{roi:.1f}%",
-            f"**Units Wagered:** {wagered:.1f}u",
+            f"**Record:** {record_str}",
+            f"**Units Profited:** {sign}{profit:.2f}u",
+            f"**ROI:** {sign}{roi:.1f}%",
         ]
-
         if pending:
-            lines.append(f"**Pending:** {pending} pick(s)")
+            lines.append(f"**Pending:** {pending}")
 
-        # Win rate
-        if total > 0:
-            win_rate = wins / total * 100
-            lines.append(f"**Win Rate:** {win_rate:.1f}%")
-
-        color = 0x2ECC71 if profit >= 0 else 0xED4245  # green if profitable, red if not
+        color = 0x2ECC71 if profit >= 0 else 0xED4245
 
         embed = discord.Embed(
-            title=title,
+            title=f"{title_prefix} — {label}",
             description="\n".join(lines),
             color=color,
         )
         await interaction.response.send_message(embed=embed)
+
+    @bot.tree.command(name="today", description="Today's betting record and profit")
+    async def cmd_today(interaction: discord.Interaction) -> None:
+        await _send_profit_embed(interaction, "today", "Today's Profit")
+
+    @bot.tree.command(name="yesterday", description="Yesterday's betting record and profit")
+    async def cmd_yesterday(interaction: discord.Interaction) -> None:
+        await _send_profit_embed(interaction, "yesterday", "Yesterday's Profit")
+
+    @bot.tree.command(name="weekly", description="This week's betting record and profit")
+    async def cmd_weekly(interaction: discord.Interaction) -> None:
+        await _send_profit_embed(interaction, "weekly", "Weekly Profit")
+
+    @bot.tree.command(name="monthly", description="This month's betting record and profit")
+    async def cmd_monthly(interaction: discord.Interaction) -> None:
+        await _send_profit_embed(interaction, "monthly", "Monthly Profit")
+
+    @bot.tree.command(name="record", description="All-time betting record and profit")
+    async def cmd_record(interaction: discord.Interaction) -> None:
+        await _send_profit_embed(interaction, "alltime", "All-Time Record")
 
     @bot.tree.command(name="results", description="Show recent pick results")
     @app_commands.describe(count="Number of recent picks to show (default 10)")
