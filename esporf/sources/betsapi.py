@@ -337,19 +337,50 @@ class BetsAPIClient:
         odds_data = results.get("odds", results)
 
         # Parse Over/Under lines (market 1_3)
+        # BetsAPI v2 can return odds either as a flat list or as a dict
+        # grouped by source (e.g. {"17_1": [...], "17_2": [...]}).
+        # Normalize both formats into a flat list of odds entries.
+        raw_ou = odds_data.get("1_3", [])
+        ou_entries: list[dict] = []
+        if isinstance(raw_ou, dict):
+            # Grouped by source — flatten all sources, preferring bet365
+            for source_entries in raw_ou.values():
+                if isinstance(source_entries, list):
+                    ou_entries.extend(source_entries)
+        elif isinstance(raw_ou, list):
+            ou_entries = raw_ou
+
         seen_lines: set[float] = set()
-        for entry in odds_data.get("1_3", []):
+        for entry in ou_entries:
+            if not isinstance(entry, dict):
+                continue
             for line in self._parse_ou_odds(entry):
                 if line.line not in seen_lines:
                     seen_lines.add(line.line)
                     odds.total_lines.append(line)
 
         # Parse 1X2 moneyline (market 1_1)
-        ml_entries = odds_data.get("1_1", [])
+        raw_ml = odds_data.get("1_1", [])
+        ml_entries: list[dict] = []
+        if isinstance(raw_ml, dict):
+            for source_entries in raw_ml.values():
+                if isinstance(source_entries, list):
+                    ml_entries.extend(source_entries)
+        elif isinstance(raw_ml, list):
+            ml_entries = raw_ml
+
         if ml_entries:
-            ml = self._parse_moneyline(ml_entries[-1])  # latest entry
-            if ml:
-                odds.moneyline = ml
+            last = ml_entries[-1]
+            if isinstance(last, dict):
+                ml = self._parse_moneyline(last)
+                if ml:
+                    odds.moneyline = ml
+
+        if not odds.has_data:
+            logger.debug(
+                "Odds response for event %s had no parseable data (keys: %s)",
+                event_id, list(odds_data.keys()) if isinstance(odds_data, dict) else "N/A",
+            )
 
         return odds
 
@@ -429,9 +460,9 @@ class BetsAPIClient:
         The handicap can be a compound Asian total like "3.5,4.0" — we split
         those into individual lines so each can be matched to trend data.
 
-        Only standard .5 lines are kept (e.g. 2.5, 3.5, 4.5). Asian quarter
-        lines (.25, .75) and whole numbers are dropped since most sportsbooks
-        don't offer them.
+        All valid positive lines are accepted (.5, whole numbers, quarter
+        lines).  The trend analysis handles any line value — it checks the
+        historical hit rate at that specific threshold.
         """
         results: list[OddsLine] = []
         try:
@@ -447,8 +478,7 @@ class BetsAPIClient:
                 if not part:
                     continue
                 line = float(part)
-                # Only keep standard .5 lines (skip .25, .75, whole numbers)
-                if line > 0 and round(line % 1, 2) == 0.5:
+                if line > 0:
                     results.append(OddsLine(line=line, over_odds=over, under_odds=under))
         except (ValueError, TypeError):
             pass

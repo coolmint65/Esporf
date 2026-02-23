@@ -37,9 +37,12 @@ console = Console()
 
 
 def _match_key(m: UpcomingMatch) -> str:
-    """Normalize a match to a dedup key based on players + start time."""
-    h = extract_handle(m.home)
-    a = extract_handle(m.away)
+    """Normalize a match to a dedup key based on players + start time.
+
+    Handles are lowercased so that AceOdds "GLORY" matches BetsAPI "Glory".
+    """
+    h = extract_handle(m.home).lower()
+    a = extract_handle(m.away).lower()
     pair = tuple(sorted([h, a]))
     return f"{pair[0]}_{pair[1]}_{m.start_time}"
 
@@ -211,15 +214,15 @@ class EsporfBot:
             for i, m in enumerate(all_upcoming):
                 if m.match_id.startswith(("esb_", "ace_")):
                     continue
-                h = extract_handle(m.home)
-                a = extract_handle(m.away)
+                h = extract_handle(m.home).lower()
+                a = extract_handle(m.away).lower()
                 pair = tuple(sorted([h, a]))
                 betsapi_lookup.setdefault(pair, []).append((i, m))
 
             cross_ref_dupes: set[int] = set()
             for idx, m in still_unresolved:
-                h = extract_handle(m.home)
-                a = extract_handle(m.away)
+                h = extract_handle(m.home).lower()
+                a = extract_handle(m.away).lower()
                 pair = tuple(sorted([h, a]))
                 best_candidate = None
                 best_delta = 301  # exceeds 300s threshold
@@ -385,10 +388,19 @@ class EsporfBot:
             for sig in (signal.SIGINT, signal.SIGTERM):
                 loop.add_signal_handler(sig, self._shutdown)
 
+        # Each scan should complete well within the poll interval; if it
+        # hangs (e.g. a DNS lookup stalls), cancel it so the loop continues.
+        scan_timeout = max(interval * 2, 120)
+
         try:
             while self._running:
                 try:
-                    await self.scan_once()
+                    await asyncio.wait_for(self.scan_once(), timeout=scan_timeout)
+                except asyncio.TimeoutError:
+                    logger.error("Scan timed out after %ds — skipping", scan_timeout)
+                    console.print(
+                        f"[red]Scan timed out after {scan_timeout}s — will retry next cycle[/red]"
+                    )
                 except Exception as e:
                     logger.error("Scan failed: %s", e, exc_info=True)
                     console.print(f"[red]Scan error: {e}[/red]")
