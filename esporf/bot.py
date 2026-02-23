@@ -492,10 +492,10 @@ class EsporfBot:
         interval = settings.poll_interval
 
         # Warn if the poll interval is suspiciously high — likely a stale .env
-        if interval > 30:
+        if interval > 300:
             console.print(
                 f"[bold yellow]Warning: POLL_INTERVAL={interval}s (from .env or env var). "
-                f"Recommended: 20s. Update POLL_INTERVAL in your .env file.[/bold yellow]\n"
+                f"Recommended: 180s. Update POLL_INTERVAL in your .env file.[/bold yellow]\n"
             )
 
         console.print(

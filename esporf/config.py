@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     timezone: str = "US/Eastern"
 
     # Polling & schedule
-    poll_interval: int = 20  # seconds — fast polling to catch sportsbook odds quickly
+    poll_interval: int = 180  # seconds (3 min) — GG/GT League matches are longer than Volta
     schedule_lookahead: int = 1800  # seconds (30 min) — how far ahead to show/alert matches
 
     # Trend detection thresholds
