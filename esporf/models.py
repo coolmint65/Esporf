@@ -131,17 +131,17 @@ class MatchOdds:
 
 
 class League(Enum):
-    """Tracked eSoccer leagues with BetsAPI league IDs."""
+    """Tracked eSoccer leagues with BetsAPI league IDs (2025 season)."""
 
-    GT_LEAGUES_12MIN = 23114
-    GG_LEAGUE_8MIN = 37298
+    ESOCCER_BATTLE_8MIN = 42648
+    GT_LEAGUES_12MIN = 42649
     VOLTA_6MIN = 38439
 
     @property
     def display_name(self) -> str:
         names = {
-            23114: "GT Leagues",
-            37298: "GG League",
+            42648: "Esoccer Battle 8min",
+            42649: "GT Leagues 12min",
             38439: "Volta",
         }
         return names.get(self.value, f"League {self.value}")

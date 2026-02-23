@@ -67,14 +67,50 @@ class EsporfBot:
         self._alerted_keys: set[str] = set()
 
     async def backfill(self) -> None:
-        """Fetch historical match data to populate the database on first run."""
-        if self.db.total_matches() > 0:
-            console.print(
-                f"[dim]Database already has {self.db.total_matches():,} matches. "
-                f"Fetching latest results...[/dim]"
-            )
-            # Just grab page 1 of ended matches to stay current
+        """Fetch historical match data to populate the database on first run.
+
+        Also does a full backfill for any tracked league that has zero matches
+        in the DB (e.g. newly added 2025 season leagues).
+        """
+        pages = settings.backfill_pages
+
+        if self.db.total_matches() == 0:
+            # First run — full backfill for all leagues
+            console.print("[bold]First run — backfilling match history...[/bold]")
             for lid in settings.tracked_league_ids:
+                console.print(f"  Fetching league {lid} ({pages} pages)...")
+                try:
+                    matches = await self.api.backfill_history(lid, pages=pages)
+                    added = self.db.insert_many(matches)
+                    console.print(f"    Added {added} matches for league {lid}")
+                except Exception as e:
+                    console.print(f"    [red]Failed: {e}[/red]")
+
+            console.print(
+                f"[bold green]Backfill complete: {self.db.total_matches():,} matches in DB[/bold green]\n"
+            )
+            return
+
+        console.print(
+            f"[dim]Database already has {self.db.total_matches():,} matches. "
+            f"Checking for updates...[/dim]"
+        )
+
+        for lid in settings.tracked_league_ids:
+            league_count = self.db.total_matches_for_league(lid)
+            if league_count == 0:
+                # New league with no history — full backfill
+                console.print(
+                    f"  [bold]New league {lid} — backfilling {pages} pages...[/bold]"
+                )
+                try:
+                    matches = await self.api.backfill_history(lid, pages=pages)
+                    added = self.db.insert_many(matches)
+                    console.print(f"    Added {added} matches for league {lid}")
+                except Exception as e:
+                    console.print(f"    [red]Failed: {e}[/red]")
+            else:
+                # Existing league — just grab latest
                 try:
                     matches = await self.api.get_ended_matches(lid, page=1)
                     added = self.db.insert_many(matches)
@@ -82,19 +118,6 @@ class EsporfBot:
                         logger.info("Added %d new results for league %d", added, lid)
                 except Exception as e:
                     logger.warning("Failed to update league %d: %s", lid, e)
-            return
-
-        # First run — full backfill
-        console.print("[bold]First run — backfilling match history...[/bold]")
-        pages = settings.backfill_pages
-        for lid in settings.tracked_league_ids:
-            console.print(f"  Fetching league {lid} ({pages} pages)...")
-            try:
-                matches = await self.api.backfill_history(lid, pages=pages)
-                added = self.db.insert_many(matches)
-                console.print(f"    Added {added} matches for league {lid}")
-            except Exception as e:
-                console.print(f"    [red]Failed: {e}[/red]")
 
         console.print(
             f"[bold green]Backfill complete: {self.db.total_matches():,} matches in DB[/bold green]\n"

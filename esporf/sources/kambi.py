@@ -50,10 +50,12 @@ _ODDS_CACHE_TTL = 30
 # Maximum time difference (seconds) when matching events by start time
 _TIME_TOLERANCE = 600  # 10 minutes
 
-# Map Kambi group IDs → BetsAPI league IDs
+# Map Kambi group IDs → BetsAPI league IDs (2025 season)
+# Note: BetsAPI uses year-specific league IDs. The generic IDs (37298, 23114)
+# have different player pools than the 2025 season tournaments.
 _GROUP_TO_LEAGUE: dict[int, int] = {
-    2000124080: 37298,   # Esports Battle (2x4min) → GG League 8min
-    2010205703: 23114,   # eSports Battle (2x6min) → GT Leagues 12min (1X2/spread only)
+    2000124080: 42648,   # Esports Battle (2x4min) → Esoccer Battle 8min (2025)
+    2010205703: 42649,   # eSports Battle (2x6min) → GT Leagues 12min (2025)
 }
 
 
