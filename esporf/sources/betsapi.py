@@ -105,6 +105,8 @@ class BetsAPIClient:
         )
         results = []
         for ev in data.get("results", []):
+            if not self._event_matches_league(ev, league_id):
+                continue
             match = self._parse_ended_match(ev, league_id)
             if match is not None:
                 results.append(match)
@@ -127,6 +129,48 @@ class BetsAPIClient:
                 break
         return all_results
 
+    # ── League verification ────────────────────────────────────────
+
+    @staticmethod
+    def _event_matches_league(event: dict, league_id: int) -> bool:
+        """Check if a BetsAPI event actually belongs to the requested league.
+
+        BetsAPI sometimes returns events from neighbouring leagues
+        (e.g. GT Leagues or GG League under a Volta query).  We check
+        both the numeric league ID *and* the league name when available.
+        """
+        event_league = event.get("league", {})
+        if not isinstance(event_league, dict) or not event_league:
+            return True  # no league info available — assume it matches
+
+        # 1. Numeric ID check
+        lid = event_league.get("id")
+        if lid is not None:
+            try:
+                if int(lid) != league_id:
+                    return False
+            except (ValueError, TypeError):
+                pass
+
+        # 2. Name-keyword check — catches misclassified events where the
+        #    numeric ID matches but the name reveals the real league.
+        name = str(event_league.get("name", "")).lower()
+        if name:
+            _REQUIRED_KEYWORDS: dict[int, str] = {
+                38439: "volta",   # eSoccer Battle - Volta - 6 Mins Play
+                23114: "gt",      # eSoccer GT Leagues - 12 Mins Play
+                37298: "gg",      # eSoccer GG League - 8 Mins Play
+            }
+            required = _REQUIRED_KEYWORDS.get(league_id)
+            if required and required not in name:
+                logger.debug(
+                    "Skipping event %s — league name '%s' missing keyword '%s'",
+                    event.get("id"), name, required,
+                )
+                return False
+
+        return True
+
     # ── Upcoming matches ─────────────────────────────────────────────
 
     async def get_upcoming_matches(self, league_id: int) -> list[UpcomingMatch]:
@@ -135,7 +179,11 @@ class BetsAPIClient:
             "/events/upcoming",
             params={"sport_id": SPORT_ID, "league_id": league_id},
         )
-        return [self._parse_upcoming(ev, league_id) for ev in data.get("results", [])]
+        return [
+            self._parse_upcoming(ev, league_id)
+            for ev in data.get("results", [])
+            if self._event_matches_league(ev, league_id)
+        ]
 
     async def get_inplay_matches(self, league_id: int) -> list[UpcomingMatch]:
         """Fetch live / in-play events for a league.
@@ -153,6 +201,8 @@ class BetsAPIClient:
         now = int(time.time())
         matches = []
         for ev in data.get("results", []):
+            if not self._event_matches_league(ev, league_id):
+                continue
             m = self._parse_upcoming(ev, league_id)
             # Only trust the "live" designation when kickoff is in the past
             m.is_live = m.start_time <= now
@@ -196,6 +246,8 @@ class BetsAPIClient:
                     },
                 )
                 for ev in data.get("results", []):
+                    if not self._event_matches_league(ev, league_id):
+                        continue
                     m = self._parse_upcoming(ev, league_id)
                     if m.match_id not in seen:
                         seen.add(m.match_id)
@@ -361,25 +413,9 @@ class BetsAPIClient:
     def _parse_upcoming(event: dict, league_id: int) -> UpcomingMatch:
         home_info = event.get("home", {})
         away_info = event.get("away", {})
-        # Use the event's actual league ID when available — BetsAPI may
-        # return matches from neighbouring leagues (e.g. GT Leagues under
-        # a Volta query).
-        actual_league_id = league_id
-        event_league = event.get("league", {})
-        if isinstance(event_league, dict) and event_league:
-            try:
-                actual_league_id = int(event_league.get("id", league_id))
-            except (ValueError, TypeError):
-                pass
-        # Also handle flat league_id field
-        elif "league_id" in event:
-            try:
-                actual_league_id = int(event["league_id"])
-            except (ValueError, TypeError):
-                pass
         return UpcomingMatch(
             match_id=str(event.get("id", "")),
-            league_id=actual_league_id,
+            league_id=league_id,
             home=home_info.get("name", "Unknown"),
             away=away_info.get("name", "Unknown"),
             start_time=int(event.get("time", 0)),

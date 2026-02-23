@@ -76,6 +76,21 @@ class ESportsBattleClient:
             if location != _VOLTA_LOCATION:
                 continue
 
+            # Extra guard: if tournament info is present, verify it's Volta
+            # (GT Leagues / GG League may share the Hillsborough location)
+            tournament = m.get("tournament", {})
+            if isinstance(tournament, dict) and tournament:
+                tourney_name = str(
+                    tournament.get("token_international", "")
+                    or tournament.get("name", "")
+                ).lower()
+                if tourney_name and "volta" not in tourney_name:
+                    logger.debug(
+                        "Skipping ESB match — tournament '%s' is not Volta",
+                        tourney_name,
+                    )
+                    continue
+
             p1 = m.get("participant1", {})
             p2 = m.get("participant2", {})
 
