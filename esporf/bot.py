@@ -300,6 +300,55 @@ class EsporfBot:
             f"{window} — fetching odds...[/dim]"
         )
 
+        # Last-chance cross-reference: some matches may still have ace_/esb_
+        # IDs because BetsAPI hadn't listed them during schedule building.
+        # Volta matches appear on BetsAPI very late (~2 min before kickoff),
+        # so a quick re-check here can catch matches that just appeared.
+        still_unresolved = [
+            m for m in all_upcoming
+            if m.match_id.startswith(("esb_", "ace_"))
+        ]
+        if still_unresolved:
+            console.print(
+                f"  [dim]{len(still_unresolved)} match(es) without BetsAPI ID "
+                f"— trying last-minute lookup...[/dim]"
+            )
+            try:
+                fresh: list[UpcomingMatch] = []
+                for lid in settings.tracked_league_ids:
+                    fresh.extend(await self.api.get_inplay_matches(lid))
+                    fresh.extend(await self.api.get_upcoming_matches(lid))
+
+                # Build lookup by player pair
+                fresh_lookup: dict[tuple[str, str], list[UpcomingMatch]] = {}
+                for fm in fresh:
+                    h = extract_handle(fm.home).lower()
+                    a = extract_handle(fm.away).lower()
+                    pair = tuple(sorted([h, a]))
+                    fresh_lookup.setdefault(pair, []).append(fm)
+
+                resolved = 0
+                for m in still_unresolved:
+                    h = extract_handle(m.home).lower()
+                    a = extract_handle(m.away).lower()
+                    pair = tuple(sorted([h, a]))
+                    for candidate in fresh_lookup.get(pair, []):
+                        if abs(candidate.start_time - m.start_time) <= 300:
+                            m.match_id = candidate.match_id
+                            resolved += 1
+                            logger.info(
+                                "Late cross-ref %s vs %s → BetsAPI %s",
+                                m.home, m.away, candidate.match_id,
+                            )
+                            break
+                if resolved:
+                    console.print(
+                        f"  [dim]Resolved {resolved}/{len(still_unresolved)} "
+                        f"match(es) via late BetsAPI lookup[/dim]"
+                    )
+            except Exception as e:
+                logger.warning("Late BetsAPI cross-ref failed: %s", e)
+
         # Fetch real odds — BetsAPI first, then bwin for anything still missing
         betsapi_matches = [
             m for m in all_upcoming
@@ -313,7 +362,7 @@ class EsporfBot:
         try:
             bwin_count = await self.bwin.attach_odds(all_upcoming)
         except Exception as e:
-            logger.debug("bwin odds fetch failed: %s", e)
+            logger.warning("bwin odds fetch failed: %s", e)
 
         odds_count = sum(1 for m in all_upcoming if m.odds and m.odds.has_data)
         if odds_count:
@@ -326,6 +375,16 @@ class EsporfBot:
             console.print(
                 f"  [dim]Got odds for {odds_count}/{len(all_upcoming)} "
                 f"matches ({', '.join(sources)})[/dim]"
+            )
+        else:
+            no_id = sum(
+                1 for m in all_upcoming
+                if m.match_id.startswith(("esb_", "ace_"))
+            )
+            console.print(
+                f"  [yellow]No odds for any of {len(all_upcoming)} match(es). "
+                f"{no_id} still without BetsAPI ID, "
+                f"bwin attached {bwin_count}.[/yellow]"
             )
 
         # Get Forebet predictions (already cached from _fetch_external_data)

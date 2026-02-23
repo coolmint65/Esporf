@@ -150,7 +150,7 @@ class BwinClient:
                     logger.info("bwin: extracted fresh access token")
                     return True
 
-            logger.debug("bwin: could not find access token in page source")
+            logger.warning("bwin: could not find access token in page source")
             return False
 
         except Exception as e:
@@ -175,7 +175,10 @@ class BwinClient:
         if not token:
             acquired = await self.refresh_token()
             if not acquired:
-                logger.debug("bwin: no access token available")
+                logger.warning(
+                    "bwin: no access token available — set BWIN_TOKEN in .env "
+                    "or check if bwin.com is reachable"
+                )
                 return []
             token = self._token
 
