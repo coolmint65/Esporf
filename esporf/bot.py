@@ -33,6 +33,7 @@ from esporf.sources.betsapi import BetsAPIClient
 from esporf.sources.bwin import BwinClient
 from esporf.sources.esportsbattle import ESportsBattleClient
 from esporf.sources.forebet import ForebetClient
+from esporf.sources.kambi import KambiClient
 from esporf.sources.totalcorner import TotalCornerClient
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,7 @@ class EsporfBot:
         self.esb = ESportsBattleClient()
         self.ace = AceOddsClient()
         self.bwin = BwinClient()
+        self.kambi = KambiClient()
         self.tc = TotalCornerClient()
         self.forebet = ForebetClient()
         self.db = MatchDatabase()
@@ -366,14 +368,23 @@ class EsporfBot:
         except Exception as e:
             logger.warning("bwin odds fetch failed: %s", e)
 
+        # Kambi fills remaining gaps: free public API, no auth needed
+        kambi_count = 0
+        try:
+            kambi_count = await self.kambi.attach_odds(all_upcoming)
+        except Exception as e:
+            logger.warning("kambi odds fetch failed: %s", e)
+
         odds_count = sum(1 for m in all_upcoming if m.odds and m.odds.has_data)
         if odds_count:
             sources = []
-            betsapi_count = odds_count - bwin_count
+            betsapi_count = odds_count - bwin_count - kambi_count
             if betsapi_count > 0:
                 sources.append(f"BetsAPI: {betsapi_count}")
             if bwin_count > 0:
                 sources.append(f"bwin: {bwin_count}")
+            if kambi_count > 0:
+                sources.append(f"Kambi: {kambi_count}")
             console.print(
                 f"  [dim]Got odds for {odds_count}/{len(all_upcoming)} "
                 f"matches ({', '.join(sources)})[/dim]"
@@ -386,7 +397,7 @@ class EsporfBot:
             console.print(
                 f"  [yellow]No odds for any of {len(all_upcoming)} match(es). "
                 f"{no_id} still without BetsAPI ID, "
-                f"bwin attached {bwin_count}.[/yellow]"
+                f"bwin attached {bwin_count}, kambi attached {kambi_count}.[/yellow]"
             )
 
         # Get Forebet predictions (already cached from _fetch_external_data)
@@ -454,7 +465,7 @@ class EsporfBot:
             f"  Poll interval: {interval}s\n"
             f"  Schedule: [bold green]AceOdds[/bold green] + ESportsBattle + BetsAPI\n"
             f"  External: [bold cyan]TotalCorner[/bold cyan] + Forebet\n"
-            f"  Odds: BetsAPI (bet365) → [bold magenta]bwin[/bold magenta] fallback\n"
+            f"  Odds: BetsAPI (bet365) → [bold magenta]bwin[/bold magenta] → [bold cyan]Kambi[/bold cyan] fallback\n"
             f"  Mode: [bold green]Sportsbook odds only[/bold green] (no trend-only picks)\n"
             f"  Min hit rate: {settings.min_hit_rate:.0%}\n"
             f"  Min sample size: {settings.min_sample_size}\n"
@@ -493,6 +504,7 @@ class EsporfBot:
             await self.api.close()
             await self.esb.close()
             await self.ace.close()
+            await self.kambi.close()
             await self.tc.close()
             await self.forebet.close()
             self.db.close()
@@ -537,6 +549,7 @@ async def scan_once() -> None:
         await bot.api.close()
         await bot.esb.close()
         await bot.ace.close()
+        await bot.kambi.close()
         await bot.tc.close()
         await bot.forebet.close()
         bot.db.close()
