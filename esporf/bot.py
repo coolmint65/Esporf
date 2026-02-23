@@ -184,10 +184,12 @@ class EsporfBot:
             logger.warning("ESportsBattle schedule failed: %s", e)
 
         # 3. Kambi: schedule + odds in one shot (GG League, GT Leagues)
+        kambi_league_ids: set[int] = set()
         try:
             kambi_matches = await self.kambi.get_schedule(settings.tracked_league_ids)
             for m in kambi_matches:
                 key = _match_key(m)
+                kambi_league_ids.add(m.league_id)
                 if key not in seen_keys:
                     seen_keys.add(key)
                     key_to_idx[key] = len(all_upcoming)
@@ -195,8 +197,10 @@ class EsporfBot:
         except Exception as e:
             logger.warning("Kambi schedule failed: %s", e)
 
-        # 4. Supplementary: BetsAPI (other leagues + real-time)
+        # 4. Supplementary: BetsAPI (leagues not covered by Kambi)
         for lid in settings.tracked_league_ids:
+            if lid in kambi_league_ids:
+                continue  # Kambi already provided schedule + odds for this league
             try:
                 schedule = await self.api.get_full_schedule(lid)
                 for m in schedule:
@@ -331,7 +335,10 @@ class EsporfBot:
             )
             try:
                 fresh: list[UpcomingMatch] = []
+                # Only query BetsAPI for leagues not covered by Kambi
                 for lid in settings.tracked_league_ids:
+                    if lid in kambi_league_ids:
+                        continue
                     fresh.extend(await self.api.get_inplay_matches(lid))
                     fresh.extend(await self.api.get_upcoming_matches(lid))
 
@@ -366,28 +373,34 @@ class EsporfBot:
                 logger.warning("Late BetsAPI cross-ref failed: %s", e)
 
         # Fetch real odds — BetsAPI first, then Kambi for anything still missing
+        # Skip kambi_ matches: they already have odds from get_schedule()
         betsapi_matches = [
             m for m in all_upcoming
-            if not m.match_id.startswith(("esb_", "ace_"))
+            if not m.match_id.startswith(("esb_", "ace_", "kambi_"))
         ]
         if betsapi_matches:
             await self.api.fetch_odds_batch(betsapi_matches)
 
-        # Kambi fills gaps: free public API, no auth, pre-live odds
-        kambi_count = 0
+        # Kambi fills remaining gaps (Volta matches that BetsAPI missed)
+        kambi_fallback = 0
         try:
-            kambi_count = await self.kambi.attach_odds(all_upcoming)
+            kambi_fallback = await self.kambi.attach_odds(all_upcoming)
         except Exception as e:
             logger.warning("kambi odds fetch failed: %s", e)
 
         odds_count = sum(1 for m in all_upcoming if m.odds and m.odds.has_data)
         if odds_count:
             sources = []
-            betsapi_count = odds_count - kambi_count
-            if betsapi_count > 0:
-                sources.append(f"BetsAPI: {betsapi_count}")
-            if kambi_count > 0:
-                sources.append(f"Kambi: {kambi_count}")
+            # Kambi schedule matches + Kambi fallback matches
+            kambi_total = sum(
+                1 for m in all_upcoming
+                if m.odds and m.odds.has_data and m.match_id.startswith("kambi_")
+            ) + kambi_fallback
+            betsapi_odds = odds_count - kambi_total
+            if betsapi_odds > 0:
+                sources.append(f"BetsAPI: {betsapi_odds}")
+            if kambi_total > 0:
+                sources.append(f"Kambi: {kambi_total}")
             console.print(
                 f"  [dim]Got odds for {odds_count}/{len(all_upcoming)} "
                 f"matches ({', '.join(sources)})[/dim]"
@@ -400,7 +413,7 @@ class EsporfBot:
             console.print(
                 f"  [yellow]No odds for any of {len(all_upcoming)} match(es). "
                 f"{no_id} still without BetsAPI ID, "
-                f"kambi attached {kambi_count}.[/yellow]"
+                f"kambi attached {kambi_fallback}.[/yellow]"
             )
 
         # Get Forebet predictions (already cached from _fetch_external_data)
