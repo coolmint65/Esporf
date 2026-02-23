@@ -8,6 +8,9 @@ eSoccer is nested under Football > Esports Football on Kambi's platform.
 We fetch all eSoccer bet offers and match them to our UpcomingMatch
 objects by player handle + approximate start time.
 
+Kambi also serves as a **schedule source**: ``get_schedule()`` returns
+UpcomingMatch objects with odds already attached — no second fetch needed.
+
 Endpoint:
     https://eu-offering-api.kambicdn.com/offering/v2018/{operator}/
         betoffer/group/{group_id}.json
@@ -15,18 +18,16 @@ Endpoint:
 
 Groups:
     2000124075 = All eSoccer (parent)
-    2000124080 = Esports Battle (2x4min) — maps to GG League 8min
-    2010205703 = eSports Battle (2x6min) — maps to GT Leagues 12min
+    2000124080 = Esports Battle (2x4min) — maps to GG League 8min (37298)
+    2010205703 = eSports Battle (2x6min) — maps to GT Leagues 12min (23114)
     2010205705 = Cyber Live Arena (2x5min)
 """
 
 from __future__ import annotations
 
 import logging
-import re
 import time
-from datetime import datetime, timezone
-from typing import Any
+from datetime import datetime
 
 import httpx
 
@@ -48,6 +49,14 @@ _ODDS_CACHE_TTL = 30
 
 # Maximum time difference (seconds) when matching events by start time
 _TIME_TOLERANCE = 600  # 10 minutes
+
+# Map Kambi group IDs → BetsAPI league IDs
+_GROUP_TO_LEAGUE: dict[int, int] = {
+    2000124080: 37298,   # Esports Battle (2x4min) → GG League 8min
+    2010205703: 23114,   # eSports Battle (2x6min) → GT Leagues 12min
+}
+# Reverse: BetsAPI league ID → Kambi group ID
+_LEAGUE_TO_GROUP: dict[int, int] = {v: k for k, v in _GROUP_TO_LEAGUE.items()}
 
 
 class KambiClient:
@@ -76,7 +85,38 @@ class KambiClient:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
 
-    # ── Main public method ─────────────────────────────────────────
+    # ── Public methods ───────────────────────────────────────────
+
+    async def get_schedule(self, league_ids: list[int] | None = None) -> list[UpcomingMatch]:
+        """Return upcoming eSoccer matches with odds already attached.
+
+        Unlike other schedule sources, Kambi provides odds in the same
+        request, so every returned match has real sportsbook odds.
+
+        If *league_ids* is given, only return events whose Kambi group
+        maps to one of those BetsAPI league IDs.  Otherwise return all.
+        """
+        kambi_events = await self._fetch_esoccer_events()
+        matches: list[UpcomingMatch] = []
+
+        for event in kambi_events:
+            # Map Kambi group → BetsAPI league ID
+            league_id = _GROUP_TO_LEAGUE.get(event.group_id)
+            if league_id is None:
+                continue  # unmapped group (e.g. Cyber Live Arena)
+            if league_ids is not None and league_id not in league_ids:
+                continue
+
+            matches.append(UpcomingMatch(
+                match_id=f"kambi_{event.event_id}",
+                league_id=league_id,
+                home=event.home,
+                away=event.away,
+                start_time=event.start_time,
+                odds=event.odds,
+            ))
+
+        return matches
 
     async def attach_odds(self, matches: list[UpcomingMatch]) -> int:
         """Fetch Kambi odds and attach to matching UpcomingMatch objects.
@@ -155,7 +195,7 @@ class KambiClient:
 class _KambiEvent:
     """Parsed Kambi event with odds."""
 
-    __slots__ = ("event_id", "home", "away", "start_time", "group", "odds")
+    __slots__ = ("event_id", "home", "away", "start_time", "group", "group_id", "odds")
 
     def __init__(
         self,
@@ -164,6 +204,7 @@ class _KambiEvent:
         away: str,
         start_time: int,
         group: str,
+        group_id: int,
         odds: MatchOdds | None,
     ) -> None:
         self.event_id = event_id
@@ -171,6 +212,7 @@ class _KambiEvent:
         self.away = away
         self.start_time = start_time
         self.group = group
+        self.group_id = group_id
         self.odds = odds
 
 
@@ -212,6 +254,7 @@ def _parse_response(data: dict) -> list[_KambiEvent]:
             continue
 
         group = ev.get("group", "")
+        group_id = ev.get("groupId", 0)
         odds = _parse_event_odds(offers_by_event.get(eid, []))
 
         results.append(_KambiEvent(
@@ -220,6 +263,7 @@ def _parse_response(data: dict) -> list[_KambiEvent]:
             away=away,
             start_time=start_ts,
             group=group,
+            group_id=group_id,
             odds=odds,
         ))
 

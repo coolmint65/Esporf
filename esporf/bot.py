@@ -3,9 +3,9 @@
 Workflow:
 1. On first run, backfill match history from BetsAPI into SQLite
 2. Every cycle: fetch newly ended matches and add to DB
-3. Fetch upcoming matches from AceOdds (full day) + ESportsBattle (~30 min) + BetsAPI
+3. Fetch upcoming matches from AceOdds (full day) + ESportsBattle (~30 min) + Kambi + BetsAPI
 4. Fetch external stats from TotalCorner (per-player) + Forebet (predictions)
-5. Fetch real sportsbook odds from BetsAPI (bet365) + Kambi
+5. Fetch real sportsbook odds from BetsAPI (bet365) + Kambi (pre-live)
 6. Run trend analysis and only surface picks with real odds + positive edge
 7. Send webhook alerts for qualifying odds-backed picks only
 """
@@ -183,7 +183,19 @@ class EsporfBot:
         except Exception as e:
             logger.warning("ESportsBattle schedule failed: %s", e)
 
-        # 3. Supplementary: BetsAPI (other leagues + real-time)
+        # 3. Kambi: schedule + odds in one shot (GG League, GT Leagues)
+        try:
+            kambi_matches = await self.kambi.get_schedule(settings.tracked_league_ids)
+            for m in kambi_matches:
+                key = _match_key(m)
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    key_to_idx[key] = len(all_upcoming)
+                    all_upcoming.append(m)
+        except Exception as e:
+            logger.warning("Kambi schedule failed: %s", e)
+
+        # 4. Supplementary: BetsAPI (other leagues + real-time)
         for lid in settings.tracked_league_ids:
             try:
                 schedule = await self.api.get_full_schedule(lid)
@@ -264,14 +276,16 @@ class EsporfBot:
 
         # Strict Volta enforcement: BetsAPI misclassifies GG League and
         # GT Leagues matches under Volta's league_id (38439).  Only keep
-        # matches that were also listed by a Volta-specific source
-        # (ESportsBattle or AceOdds).  If both sources failed, skip this
-        # filter to avoid a complete blackout.
+        # Volta-league matches that were also listed by a Volta-specific
+        # source (ESportsBattle or AceOdds).  Non-Volta leagues (GG League,
+        # GT Leagues) pass through unfiltered.  If both Volta sources
+        # failed, skip this filter to avoid a complete blackout.
+        volta_lid = 38439
         if volta_confirmed:
             before = len(all_upcoming)
             all_upcoming = [
                 m for m in all_upcoming
-                if _match_key(m) in volta_confirmed
+                if m.league_id != volta_lid or _match_key(m) in volta_confirmed
             ]
             dropped = before - len(all_upcoming)
             if dropped:
@@ -452,9 +466,9 @@ class EsporfBot:
             f"[bold blue]Esporf Odds Bot Starting[/bold blue]\n"
             f"  Tracking leagues: {settings.league_ids}\n"
             f"  Poll interval: {interval}s\n"
-            f"  Schedule: [bold green]AceOdds[/bold green] + ESportsBattle + BetsAPI\n"
+            f"  Schedule: [bold green]AceOdds[/bold green] + ESportsBattle + [bold cyan]Kambi[/bold cyan] + BetsAPI\n"
             f"  External: [bold cyan]TotalCorner[/bold cyan] + Forebet\n"
-            f"  Odds: BetsAPI (bet365) → [bold cyan]Kambi[/bold cyan] fallback\n"
+            f"  Odds: BetsAPI (bet365) + [bold cyan]Kambi[/bold cyan] (pre-live)\n"
             f"  Mode: [bold green]Sportsbook odds only[/bold green] (no trend-only picks)\n"
             f"  Min hit rate: {settings.min_hit_rate:.0%}\n"
             f"  Min sample size: {settings.min_sample_size}\n"
