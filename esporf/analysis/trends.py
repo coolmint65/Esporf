@@ -19,7 +19,7 @@ import logging
 from esporf.config import settings
 from esporf.database import MatchDatabase
 from esporf.models import (
-    MONEYLINE_ONLY_LEAGUES,
+    NO_TOTALS_LEAGUES,
     MatchResult,
     MatchupReport,
     Trend,
@@ -62,7 +62,7 @@ class TrendAnalyzer:
         )
 
         # Determine which goal lines to analyze
-        if match.league_id in MONEYLINE_ONLY_LEAGUES:
+        if match.league_id in NO_TOTALS_LEAGUES:
             # GT Leagues — sportsbooks don't offer O/U goals, moneyline only
             check_lines = []
             logger.debug(
@@ -95,7 +95,11 @@ class TrendAnalyzer:
         # 5. Away player AWAY-specific trends
         trends.extend(self._player_away_trends(match.away, match.league_id, check_lines))
 
-        # 6. TotalCorner per-player trends (external)
+        # 6. Spread trends (-0.5 / +0.5) when spread odds are available
+        if match.odds and match.odds.spreads:
+            trends.extend(self._spread_trends(match.home, match.away, match.league_id))
+
+        # 7. TotalCorner per-player trends (external)
         if tc_stats:
             trends.extend(
                 self._tc_player_trends(match.home, tc_stats, match.league_id, check_lines)
@@ -258,6 +262,90 @@ class TrendAnalyzer:
             league_id=league_id, recent=recent,
             desc_template=f"{player} {suffix} — Wins",
         ))
+
+        return [t for t in trends if t is not None]
+
+    # ── Spread Trends (-0.5 / +0.5) ─────────────────────────────────
+
+    def _spread_trends(
+        self, home: str, away: str, league_id: int | None
+    ) -> list[Trend]:
+        """Generate spread trend categories from win/draw history.
+
+        -0.5 spread = player must win outright (hit when player wins)
+        +0.5 spread = player wins or draws (hit when player doesn't lose)
+        """
+        trends: list[Trend] = []
+
+        # H2H matches for spread analysis
+        h2h = self.db.get_h2h_matches(home, away, limit=self.last_n)
+        if len(h2h) >= self.min_sample:
+            recent = [m.score_str() for m in h2h[:5]]
+
+            # Home -0.5 (home must win)
+            home_wins = sum(1 for m in h2h if m.won_by(home))
+            trends.append(self._make_trend(
+                category=f"{home} -0.5",
+                hits=home_wins, total=len(h2h),
+                trend_type="h2h", player_a=home, player_b=away,
+                league_id=league_id, recent=recent,
+                desc_template=f"{home} -0.5 vs {away} (wins outright)",
+            ))
+
+            # Home +0.5 (home wins or draws)
+            home_no_loss = sum(1 for m in h2h if m.won_by(home) or m.is_draw)
+            trends.append(self._make_trend(
+                category=f"{home} +0.5",
+                hits=home_no_loss, total=len(h2h),
+                trend_type="h2h", player_a=home, player_b=away,
+                league_id=league_id, recent=recent,
+                desc_template=f"{home} +0.5 vs {away} (wins or draws)",
+            ))
+
+            # Away -0.5 (away must win)
+            away_wins = sum(1 for m in h2h if m.won_by(away))
+            trends.append(self._make_trend(
+                category=f"{away} -0.5",
+                hits=away_wins, total=len(h2h),
+                trend_type="h2h", player_a=away, player_b=home,
+                league_id=league_id, recent=recent,
+                desc_template=f"{away} -0.5 vs {home} (wins outright)",
+            ))
+
+            # Away +0.5 (away wins or draws)
+            away_no_loss = sum(1 for m in h2h if m.won_by(away) or m.is_draw)
+            trends.append(self._make_trend(
+                category=f"{away} +0.5",
+                hits=away_no_loss, total=len(h2h),
+                trend_type="h2h", player_a=away, player_b=home,
+                league_id=league_id, recent=recent,
+                desc_template=f"{away} +0.5 vs {home} (wins or draws)",
+            ))
+
+        # Overall player stats for spread trends
+        for player, trend_type in [(home, "player_overall"), (away, "player_overall")]:
+            matches = self.db.get_player_matches(player, limit=self.last_n, league_id=league_id)
+            if len(matches) < self.min_sample:
+                continue
+            recent = [m.score_str() for m in matches[:5]]
+
+            wins = sum(1 for m in matches if m.won_by(player))
+            trends.append(self._make_trend(
+                category=f"{player} -0.5",
+                hits=wins, total=len(matches),
+                trend_type=trend_type, player_a=player,
+                league_id=league_id, recent=recent,
+                desc_template=f"{player} -0.5 overall (wins outright)",
+            ))
+
+            no_loss = sum(1 for m in matches if m.won_by(player) or m.is_draw)
+            trends.append(self._make_trend(
+                category=f"{player} +0.5",
+                hits=no_loss, total=len(matches),
+                trend_type=trend_type, player_a=player,
+                league_id=league_id, recent=recent,
+                desc_template=f"{player} +0.5 overall (wins or draws)",
+            ))
 
         return [t for t in trends if t is not None]
 

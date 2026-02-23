@@ -31,7 +31,7 @@ from datetime import datetime
 
 import httpx
 
-from esporf.models import MatchOdds, MoneylineOdds, OddsLine, UpcomingMatch, extract_handle
+from esporf.models import MatchOdds, MoneylineOdds, OddsLine, SpreadLine, UpcomingMatch, extract_handle
 
 logger = logging.getLogger(__name__)
 
@@ -141,10 +141,11 @@ class KambiClient:
                 match.odds = best.odds
                 attached += 1
                 logger.info(
-                    "kambi odds for %s: lines=%s, ML=%s",
+                    "kambi odds for %s: lines=%s, ML=%s, spreads=%s",
                     match.display_name,
                     best.odds.available_lines,
                     "yes" if best.odds.moneyline else "no",
+                    [s.handicap for s in best.odds.spreads] if best.odds.spreads else "no",
                 )
 
         return attached
@@ -274,7 +275,9 @@ def _parse_event_odds(offers: list[dict]) -> MatchOdds | None:
     """Parse all bet offers for a single event into MatchOdds."""
     total_lines: list[OddsLine] = []
     moneyline: MoneylineOdds | None = None
+    spreads: list[SpreadLine] = []
     seen_lines: set[float] = set()
+    seen_handicaps: set[float] = set()
 
     for offer in offers:
         offer_type = offer.get("betOfferType", {}).get("name", "")
@@ -352,10 +355,51 @@ def _parse_event_odds(offers: list[dict]) -> MatchOdds | None:
                     source="kambi",
                 )
 
-    if not total_lines and not moneyline:
+        # ── Handicap / Spread (e.g. -0.5 / +0.5) ──
+        elif offer_type == "Handicap" and criterion.get("lifetime") == "FULL_TIME":
+            home_odds_s = away_odds_s = 0.0
+            handicap_val = None
+
+            for oc in outcomes:
+                raw_odds = oc.get("odds")
+                raw_line = oc.get("line")
+                if raw_odds is None or raw_line is None:
+                    continue
+
+                dec_odds = raw_odds / 1000.0
+                line = raw_line / 1000.0
+                if dec_odds <= 1.0:
+                    continue
+
+                # Only accept .5 handicaps (-0.5, +0.5)
+                if round(abs(line) % 1, 2) != 0.5:
+                    continue
+
+                oc_type = oc.get("type", "")
+                if oc_type == "OT_ONE":
+                    home_odds_s = dec_odds
+                    handicap_val = line  # home perspective handicap
+                elif oc_type == "OT_TWO":
+                    away_odds_s = dec_odds
+
+            if (
+                handicap_val is not None
+                and home_odds_s > 0
+                and away_odds_s > 0
+                and handicap_val not in seen_handicaps
+            ):
+                seen_handicaps.add(handicap_val)
+                spreads.append(SpreadLine(
+                    handicap=handicap_val,
+                    home_odds=home_odds_s,
+                    away_odds=away_odds_s,
+                    source="kambi",
+                ))
+
+    if not total_lines and not moneyline and not spreads:
         return None
 
-    return MatchOdds(total_lines=total_lines, moneyline=moneyline)
+    return MatchOdds(total_lines=total_lines, moneyline=moneyline, spreads=spreads)
 
 
 # ── Event matching ────────────────────────────────────────────────

@@ -107,17 +107,56 @@ class MoneylineOdds:
 
 
 @dataclass
+class SpreadLine:
+    """A handicap spread line (e.g. -0.5 / +0.5) with odds.
+
+    handicap: the line value (e.g. -0.5 or +0.5)
+    home_odds: decimal odds for the home side at this handicap
+    away_odds: decimal odds for the away side at this handicap
+    """
+
+    handicap: float  # -0.5 or +0.5
+    home_odds: float  # decimal
+    away_odds: float  # decimal
+    source: str = "kambi"
+
+    @property
+    def home_american(self) -> str:
+        return _decimal_to_american(self.home_odds)
+
+    @property
+    def away_american(self) -> str:
+        return _decimal_to_american(self.away_odds)
+
+    @property
+    def home_implied(self) -> float:
+        return 1.0 / self.home_odds if self.home_odds > 0 else 1.0
+
+    @property
+    def away_implied(self) -> float:
+        return 1.0 / self.away_odds if self.away_odds > 0 else 1.0
+
+
+@dataclass
 class MatchOdds:
-    """All available odds for a match, fetched from BetsAPI."""
+    """All available odds for a match, fetched from BetsAPI or Kambi."""
 
     total_lines: list[OddsLine] = field(default_factory=list)
     moneyline: MoneylineOdds | None = None
+    spreads: list[SpreadLine] = field(default_factory=list)
 
     def get_line(self, value: float) -> OddsLine | None:
         """Find a specific O/U line by value (e.g. 4.5)."""
         for ol in self.total_lines:
             if ol.line == value:
                 return ol
+        return None
+
+    def get_spread(self, handicap: float) -> SpreadLine | None:
+        """Find a specific spread line by handicap (e.g. -0.5)."""
+        for sl in self.spreads:
+            if sl.handicap == handicap:
+                return sl
         return None
 
     @property
@@ -127,7 +166,7 @@ class MatchOdds:
 
     @property
     def has_data(self) -> bool:
-        return len(self.total_lines) > 0 or self.moneyline is not None
+        return len(self.total_lines) > 0 or self.moneyline is not None or len(self.spreads) > 0
 
 
 # Display names for all known league IDs (current + legacy)
@@ -159,8 +198,9 @@ class League(Enum):
         return league_display_name(self.value)
 
 
-# Leagues where sportsbooks only offer moneyline (1X2) — no Over/Under goals
-MONEYLINE_ONLY_LEAGUES: set[int] = {
+# Leagues where sportsbooks don't offer Over/Under goal lines.
+# These leagues have moneyline (1X2) and spread (-0.5 / +0.5) only.
+NO_TOTALS_LEAGUES: set[int] = {
     League.GT_LEAGUES_12MIN.value,  # 42649
     23114,                          # GT Leagues (legacy ID)
 }
@@ -303,12 +343,14 @@ class Trend:
 class BetPick:
     """The single best bet recommendation derived from qualifying trends."""
 
-    market: str  # e.g. "Over 5.5 Goals", "Player Over 1.5 Scored"
+    market: str  # e.g. "Over 5.5 Goals", "Player -0.5"
     confidence: float  # weighted score combining hit rate + sample size + agreement
     supporting_trends: list[Trend]  # trends that back this pick
     reason: str  # human-readable explanation
     odds_line: OddsLine | None = None  # actual O/U odds if available
     moneyline: MoneylineOdds | None = None  # actual 1X2 odds if available
+    spread_line: SpreadLine | None = None  # actual spread odds if available
+    _spread_side: str | None = None  # "home" or "away" for spread picks
     edge: float | None = None  # hit_rate - implied_probability (value edge)
 
     @property
@@ -328,6 +370,10 @@ class BetPick:
     @property
     def decimal_odds(self) -> float | None:
         """The decimal odds for this pick's market, if real odds are attached."""
+        if self.spread_line:
+            if self._spread_side == "home":
+                return self.spread_line.home_odds
+            return self.spread_line.away_odds
         if not self.odds_line:
             return None
         parsed = _parse_line(self.market)
@@ -341,6 +387,10 @@ class BetPick:
     @property
     def american_odds(self) -> str | None:
         """The American odds string for this pick's market."""
+        if self.spread_line:
+            if self._spread_side == "home":
+                return self.spread_line.home_american
+            return self.spread_line.away_american
         if not self.odds_line:
             return None
         parsed = _parse_line(self.market)
@@ -481,9 +531,12 @@ class MatchupReport:
         best_edge = 0.0
         best_odds_line: OddsLine | None = None
         best_ml: MoneylineOdds | None = None
+        best_spread: SpreadLine | None = None
+        best_spread_side: str | None = None
 
         for market, trends in market_groups.items():
             parsed = _parse_line(market)
+            parsed_spread = _parse_spread(market)
             agreement = len(trends)
             avg_rate = sum(t.hit_rate for t in trends) / agreement
             avg_sample = sum(t.sample_size for t in trends) / agreement
@@ -535,6 +588,61 @@ class MatchupReport:
                     best_edge = edge
                     best_odds_line = odds_line
                     best_ml = None
+                    best_spread = None
+                    best_spread_side = None
+
+            elif parsed_spread and odds.spreads:
+                # Spread market (e.g. "PlayerName -0.5") — match to spread odds
+                player_name, handicap = parsed_spread
+                spread = odds.get_spread(handicap)
+                if not spread:
+                    continue
+
+                # Determine if player is home or away
+                side = _get_spread_side(player_name, self.match)
+                if side is None:
+                    continue
+
+                if side == "home":
+                    implied = spread.home_implied
+                    dec_odds = spread.home_odds
+                else:
+                    implied = spread.away_implied
+                    dec_odds = spread.away_odds
+
+                edge = avg_rate - implied
+                if edge < MIN_EDGE:
+                    continue
+
+                payout = dec_odds - 1.0
+                ev_per_unit = (avg_rate * payout) - (1.0 - avg_rate)
+
+                ev_norm = min(max(ev_per_unit, 0.0) / 0.50, 1.0)
+                edge_norm = min(edge / 0.30, 1.0)
+
+                juice_penalty = 0.0
+                if dec_odds < 1.50:
+                    juice_penalty = 0.15
+                elif dec_odds < 1.67:
+                    juice_penalty = 0.05
+
+                score = (
+                    ev_norm * 0.35
+                    + edge_norm * 0.25
+                    + min(agreement / 5, 1.0) * 0.20
+                    + avg_rate * 0.20
+                    - juice_penalty
+                )
+                if score > best_score:
+                    best_score = score
+                    best_market = market
+                    best_trends = trends
+                    best_edge = edge
+                    best_odds_line = None
+                    best_ml = None
+                    best_spread = spread
+                    best_spread_side = side
+
             else:
                 # Non-line market (Win, Draw) — use moneyline odds if available
                 ml = odds.moneyline
@@ -560,6 +668,8 @@ class MatchupReport:
                     best_edge = edge
                     best_odds_line = None
                     best_ml = ml
+                    best_spread = None
+                    best_spread_side = None
 
         if best_market is None:
             return None
@@ -577,6 +687,11 @@ class MatchupReport:
                     odds_str = f" @ {best_odds_line.over_american}"
                 else:
                     odds_str = f" @ {best_odds_line.under_american}"
+        elif best_spread:
+            if best_spread_side == "home":
+                odds_str = f" @ {best_spread.home_american}"
+            else:
+                odds_str = f" @ {best_spread.away_american}"
 
         reason = (
             f"{best_market}{odds_str} backed by {len(best_trends)} trend(s) "
@@ -590,6 +705,8 @@ class MatchupReport:
             reason=reason,
             odds_line=best_odds_line,
             moneyline=best_ml,
+            spread_line=best_spread,
+            _spread_side=best_spread_side,
             edge=best_edge,
         )
 
@@ -607,6 +724,7 @@ def _trend_source_label(trend_type: str) -> str:
 # ── Line-selection helpers ──────────────────────────────────────
 
 _LINE_RE = re.compile(r"(Over|Under)\s+(\d+(?:\.\d+)?)\s+Goals$", re.IGNORECASE)
+_SPREAD_RE = re.compile(r"(.+?)\s+([+-]\d+(?:\.\d+)?)$")
 
 
 def _parse_line(market: str) -> tuple[str, float] | None:
@@ -615,6 +733,17 @@ def _parse_line(market: str) -> tuple[str, float] | None:
     Returns e.g. ("Under", 4.5) or None for non-line markets.
     """
     m = _LINE_RE.match(market)
+    if not m:
+        return None
+    return m.group(1), float(m.group(2))
+
+
+def _parse_spread(market: str) -> tuple[str, float] | None:
+    """Extract player name and handicap from a spread market.
+
+    Returns e.g. ("PlayerName", -0.5) or None for non-spread markets.
+    """
+    m = _SPREAD_RE.match(market)
     if not m:
         return None
     return m.group(1), float(m.group(2))
@@ -634,6 +763,22 @@ def _poisson_over_prob(avg_goals: float, line: float) -> float:
     for k in range(k_max + 1):
         cdf += (avg_goals ** k) * math.exp(-avg_goals) / math.factorial(k)
     return max(0.0, min(1.0, 1.0 - cdf))
+
+
+def _get_spread_side(player_name: str, match: UpcomingMatch) -> str | None:
+    """Determine if a player is home or away in a match.
+
+    Returns "home", "away", or None if the player can't be matched.
+    """
+    pn = player_name.lower()
+    home_handle = extract_handle(match.home).lower()
+    away_handle = extract_handle(match.away).lower()
+
+    if home_handle in pn or pn in home_handle or match.home.lower() in pn:
+        return "home"
+    if away_handle in pn or pn in away_handle or match.away.lower() in pn:
+        return "away"
+    return None
 
 
 def _get_moneyline_implied(

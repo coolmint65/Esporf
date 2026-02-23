@@ -61,7 +61,7 @@ def display_matchup_report(report: MatchupReport) -> None:
     units = pick.units_display
 
     # Build body with actual odds and EV when available
-    has_real_odds = pick.odds_line is not None
+    has_real_odds = pick.odds_line is not None or pick.spread_line is not None
     odds_str = ""
     if pick.american_odds:
         odds_str = f"  [bold cyan]({pick.american_odds})[/]"
@@ -97,7 +97,7 @@ def display_matchup_report(report: MatchupReport) -> None:
     if match.odds and match.odds.has_data:
         lines_display = "  ".join(f"{ol.line}" for ol in match.odds.total_lines)
         context_parts.append(f"Lines: {lines_display}")
-    elif not pick.odds_line:
+    elif not pick.odds_line and not pick.spread_line:
         context_parts.append("No book odds")
 
     # Show external data sources contributing to this pick
