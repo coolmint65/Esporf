@@ -143,7 +143,7 @@ class TestPlayerTrends:
 
         win_trends = [
             t for t in report.trends
-            if t.category == "Win" and t.player_a == "Alpha"
+            if t.category == "Alpha Win" and t.player_a == "Alpha"
         ]
         assert len(win_trends) >= 1
         assert win_trends[0].hit_rate == 12 / 15

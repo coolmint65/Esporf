@@ -31,6 +31,7 @@ from esporf.models import (
     BetPick,
     MatchResult,
     MatchupReport,
+    NO_TOTALS_LEAGUES,
     PickResult,
     TrackedPick,
     UpcomingMatch,
@@ -735,6 +736,29 @@ class EsporfBot:
             )
             reports.append(report)
 
+        # Log GT league diagnostic — surface why picks are/aren't generated
+        for r in reports:
+            if r.match.league_id in NO_TOTALS_LEAGUES:
+                has_odds = r.match.odds and r.match.odds.has_data
+                has_ml = r.match.odds and r.match.odds.moneyline if has_odds else False
+                has_spreads = r.match.odds and r.match.odds.spreads if has_odds else False
+                logger.info(
+                    "GT diagnostic: %s vs %s — odds=%s ml=%s spreads=%s "
+                    "trends=%d best_bet=%s",
+                    extract_handle(r.match.home),
+                    extract_handle(r.match.away),
+                    has_odds, bool(has_ml), bool(has_spreads),
+                    len(r.trends),
+                    r.best_bet.market if r.best_bet else "None",
+                )
+                if r.trends and not r.best_bet:
+                    for t in r.trends:
+                        logger.info(
+                            "  GT trend: %s — %.0f%% (%d/%d)",
+                            t.category, t.hit_rate * 100,
+                            t.hits, t.sample_size,
+                        )
+
         # Display results — only picks backed by real sportsbook odds
         reports_with_picks = [r for r in reports if r.best_bet is not None]
 
@@ -761,6 +785,7 @@ class EsporfBot:
                 if _match_key(r.match) not in self._alerted_keys
             ]
             if new_reports:
+                new_reports.sort(key=lambda r: r.match.start_time)
                 await send_alerts(new_reports)
                 for r in new_reports:
                     self._alerted_keys.add(_match_key(r.match))
@@ -778,6 +803,10 @@ class EsporfBot:
             picks_alerted=alerted_count,
             leagues_scanned=settings.league_ids,
         )
+
+        # Auto-update CSV data export after every scan
+        from esporf.export import export_all
+        export_all(self.db)
 
         return reports_with_picks
 

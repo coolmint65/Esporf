@@ -303,7 +303,7 @@ class TrendAnalyzer:
         # Win rate
         wins = sum(1 for m in matches if m.won_by(player))
         trends.append(self._make_trend(
-            category="Win",
+            category=f"{player} Win",
             hits=wins, total=len(matches),
             trend_type=trend_type, player_a=player,
             league_id=league_id, recent=recent,
@@ -454,7 +454,7 @@ class TrendAnalyzer:
         # Win rate from TC
         if ps.win_rate >= self.min_hit_rate:
             trends.append(Trend(
-                category="Win",
+                category=f"{player} Win",
                 description=(
                     f"{player} (TC {ps.matches_played} games) — "
                     f"Win rate {ps.wins}/{ps.matches_played} ({ps.win_rate:.0%})"
