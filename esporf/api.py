@@ -343,7 +343,32 @@ def get_stats(
     try:
         since = int(time.time()) - (days * 86400) if days else None
         summary = db.get_pick_summary(league_id=league_id, since=since)
-        return _build_stats(summary)
+        stats = _build_stats(summary)
+
+        # Add match-level data
+        conn = db._get_conn()
+        if league_id:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt, AVG(home_score + away_score) as avg_goals FROM matches WHERE league_id = ?",
+                (league_id,),
+            ).fetchone()
+            players_row = conn.execute(
+                """SELECT COUNT(DISTINCT handle) as cnt FROM player_form WHERE league_id = ?""",
+                (league_id,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt, AVG(home_score + away_score) as avg_goals FROM matches"
+            ).fetchone()
+            players_row = conn.execute(
+                "SELECT COUNT(DISTINCT handle) as cnt FROM player_form"
+            ).fetchone()
+
+        stats.total_matches = row["cnt"]
+        stats.total_players = players_row["cnt"]
+        stats.avg_total_goals = round(row["avg_goals"], 1) if row["avg_goals"] else None
+        stats.avg_total_goals_display = f"{row['avg_goals']:.1f}" if row["avg_goals"] else "--"
+        return stats
     finally:
         db.close()
 
@@ -357,15 +382,22 @@ def get_stats_breakdown():
         overall_summary = db.get_pick_summary()
         overall = _build_stats(overall_summary)
 
-        # By league
+        # By league — use actual DB league IDs
+        conn = db._get_conn()
+        db_league_rows = conn.execute(
+            "SELECT DISTINCT league_id FROM matches"
+        ).fetchall()
+        db_league_ids = {r["league_id"] for r in db_league_rows}
+        all_league_ids = db_league_ids | {l.value for l in League}
+
         by_league = []
-        for league in League:
-            lid = league.value
+        for lid in sorted(all_league_ids):
+            match_count = db.total_matches_for_league(lid)
             s = db.get_pick_summary(league_id=lid)
             total = s["total"]
             win_rate = s["wins"] / total if total > 0 else None
             by_league.append(LeagueStatsResponse(
-                league=league.display_name,
+                league=league_display_name(lid),
                 league_id=lid,
                 record=f"{s['wins']}-{s['losses']}" + (f"-{s['pushes']}" if s["pushes"] else ""),
                 wins=s["wins"],
@@ -374,8 +406,9 @@ def get_stats_breakdown():
                 profit_display=f"{'+' if s['profit'] >= 0 else ''}{s['profit']:.1f}u",
                 win_rate=win_rate,
                 win_rate_pct=f"{win_rate:.1%}" if win_rate is not None else "N/A",
-                total_matches=db.total_matches_for_league(lid),
+                total_matches=match_count,
             ))
+        by_league.sort(key=lambda x: x.total_matches, reverse=True)
 
         # By market (group picks by market type)
         all_picks = db.get_all_picks(limit=10000)
@@ -728,14 +761,22 @@ def get_leagues():
     """All tracked leagues with match counts and pick stats."""
     db = _get_db()
     try:
+        # Get all league IDs actually present in the DB, plus configured ones
+        conn = db._get_conn()
+        db_league_rows = conn.execute(
+            "SELECT DISTINCT league_id FROM matches"
+        ).fetchall()
+        db_league_ids = {r["league_id"] for r in db_league_rows}
+        all_league_ids = db_league_ids | {l.value for l in League}
+
         results = []
-        for league in League:
-            lid = league.value
+        for lid in sorted(all_league_ids):
+            match_count = db.total_matches_for_league(lid)
             s = db.get_pick_summary(league_id=lid)
             total = s["total"]
             win_rate = s["wins"] / total if total > 0 else None
             results.append(LeagueStatsResponse(
-                league=league.display_name,
+                league=league_display_name(lid),
                 league_id=lid,
                 record=f"{s['wins']}-{s['losses']}" + (f"-{s['pushes']}" if s["pushes"] else ""),
                 wins=s["wins"],
@@ -744,8 +785,10 @@ def get_leagues():
                 profit_display=f"{'+' if s['profit'] >= 0 else ''}{s['profit']:.1f}u",
                 win_rate=win_rate,
                 win_rate_pct=f"{win_rate:.1%}" if win_rate is not None else "N/A",
-                total_matches=db.total_matches_for_league(lid),
+                total_matches=match_count,
             ))
+        # Sort by match count descending so most active leagues appear first
+        results.sort(key=lambda x: x.total_matches, reverse=True)
         return results
     finally:
         db.close()

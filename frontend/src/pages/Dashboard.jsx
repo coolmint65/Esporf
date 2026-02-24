@@ -34,6 +34,7 @@ export default function Dashboard() {
 
   if (statsLoading) return <Loading />
 
+  const hasPicks = stats?.total_decided > 0
   const profitColor = stats?.profit >= 0 ? 'green' : 'red'
   const roiColor = stats?.roi != null && stats.roi >= 0 ? 'green' : stats?.roi != null ? 'red' : undefined
 
@@ -44,31 +45,50 @@ export default function Dashboard() {
         <p className="text-sm text-muted mt-1">Performance overview</p>
       </div>
 
-      {/* Stat cards */}
+      {/* Database stat cards — always visible */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
-        <StatCard label="Record" value={stats?.record ?? '--'} sub={`${stats?.total_decided ?? 0} decided`} />
-        <StatCard label="Profit" value={stats?.profit_display ?? '--'} sub={`${stats?.units_wagered ?? 0}u wagered`} color={profitColor} />
-        <StatCard label="Win Rate" value={stats?.win_rate_pct ?? '--'} sub={`${stats?.wins ?? 0}W / ${stats?.losses ?? 0}L`} />
-        <StatCard label="ROI" value={stats?.roi_pct ?? '--'} color={roiColor} />
-        <StatCard label="Pending" value={stats?.pending ?? 0} sub="awaiting result" color="blue" />
+        <StatCard label="Matches" value={stats?.total_matches?.toLocaleString() ?? '--'} sub="in database" color="blue" />
+        <StatCard label="Players" value={stats?.total_players ?? '--'} sub="tracked" />
+        <StatCard label="Avg Goals" value={stats?.avg_total_goals_display ?? '--'} sub="per match" />
+        {hasPicks ? (
+          <>
+            <StatCard label="Record" value={stats?.record ?? '--'} sub={`${stats?.total_decided ?? 0} decided`} />
+            <StatCard label="Profit" value={stats?.profit_display ?? '--'} sub={`${stats?.units_wagered ?? 0}u wagered`} color={profitColor} />
+          </>
+        ) : (
+          <>
+            <StatCard label="Record" value={stats?.record ?? '0-0'} sub="no picks yet" />
+            <StatCard label="Pending" value={stats?.pending ?? 0} sub="awaiting result" color="blue" />
+          </>
+        )}
       </div>
+
+      {/* Pick stats row — only when there are picks */}
+      {hasPicks && (
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+          <StatCard label="Win Rate" value={stats?.win_rate_pct ?? '--'} sub={`${stats?.wins ?? 0}W / ${stats?.losses ?? 0}L`} />
+          <StatCard label="ROI" value={stats?.roi_pct ?? '--'} color={roiColor} />
+          <StatCard label="Units Wagered" value={`${stats?.units_wagered ?? 0}u`} />
+          <StatCard label="Pending" value={stats?.pending ?? 0} sub="awaiting result" color="blue" />
+        </div>
+      )}
 
       {/* Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        <Card title="Profit by League" icon iconColor="bg-accent">
+        <Card title="Matches by League" icon iconColor="bg-accent">
           {breakdown?.by_league ? (
             <div className="h-56">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={breakdown.by_league} margin={{ top: 8, right: 8, bottom: 0, left: -12 }}>
                   <XAxis dataKey="league" tick={{ fill: '#8b90a5', fontSize: 12 }} axisLine={false} tickLine={false} />
-                  <YAxis tick={{ fill: '#8b90a5', fontSize: 12 }} axisLine={false} tickLine={false} tickFormatter={v => `${v}u`} />
+                  <YAxis tick={{ fill: '#8b90a5', fontSize: 12 }} axisLine={false} tickLine={false} />
                   <Tooltip
                     contentStyle={{ background: '#1a1d27', border: '1px solid #2e3245', borderRadius: 8, fontSize: 13 }}
-                    formatter={(v) => [`${v >= 0 ? '+' : ''}${v}u`, 'Profit']}
+                    formatter={(v, name) => [v.toLocaleString(), name === 'total_matches' ? 'Matches' : name]}
                   />
-                  <Bar dataKey="profit" radius={[6, 6, 0, 0]}>
+                  <Bar dataKey="total_matches" radius={[6, 6, 0, 0]}>
                     {breakdown.by_league.map((entry, i) => (
-                      <Cell key={i} fill={entry.profit >= 0 ? '#3b82f6' : '#ef4444'} />
+                      <Cell key={i} fill={['#3b82f6', '#8b5cf6', '#06b6d4', '#22c55e', '#f59e0b'][i % 5]} />
                     ))}
                   </Bar>
                 </BarChart>
@@ -77,8 +97,8 @@ export default function Dashboard() {
           ) : <Loading />}
         </Card>
 
-        <Card title="Profit by Market" icon iconColor="bg-purple">
-          {breakdown?.by_market ? (
+        {hasPicks && breakdown?.by_market?.length > 0 ? (
+          <Card title="Profit by Market" icon iconColor="bg-purple">
             <div className="h-56">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={breakdown.by_market} margin={{ top: 8, right: 8, bottom: 0, left: -12 }}>
@@ -96,8 +116,31 @@ export default function Dashboard() {
                 </BarChart>
               </ResponsiveContainer>
             </div>
-          ) : <Loading />}
-        </Card>
+          </Card>
+        ) : (
+          <Card title="League Details" icon iconColor="bg-purple">
+            {breakdown?.by_league ? (
+              <Table>
+                <thead>
+                  <tr>
+                    <Th>League</Th>
+                    <Th>Matches</Th>
+                    <Th>Record</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {breakdown.by_league.map((l, i) => (
+                    <tr key={i}>
+                      <Td className="font-medium">{l.league}</Td>
+                      <Td>{l.total_matches.toLocaleString()}</Td>
+                      <Td className="text-muted">{l.record || '--'}</Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </Table>
+            ) : <Loading />}
+          </Card>
+        )}
       </div>
 
       {/* Live picks + Recent matches */}
@@ -161,7 +204,7 @@ export default function Dashboard() {
         </Card>
       </div>
 
-      {/* Confidence breakdown */}
+      {/* Confidence breakdown — only when picks exist */}
       {breakdown?.by_confidence?.length > 0 && (
         <Card title="By Confidence Tier" icon iconColor="bg-cyan">
           <Table>
