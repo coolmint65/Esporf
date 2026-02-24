@@ -158,8 +158,10 @@ class BetsAPIClient:
         if name:
             _REQUIRED_KEYWORDS: dict[int, str] = {
                 38439: "volta",   # eSoccer Battle - Volta - 6 Mins Play
-                23114: "gt",      # eSoccer GT Leagues - 12 Mins Play
-                37298: "gg",      # eSoccer GG League - 8 Mins Play
+                42648: "battle",  # Esoccer Battle 8min (2025 season)
+                42649: "gt",      # GT Leagues 12min (2025 season)
+                23114: "gt",      # eSoccer GT Leagues - 12 Mins Play (legacy)
+                37298: "gg",      # eSoccer GG League - 8 Mins Play (legacy)
             }
             required = _REQUIRED_KEYWORDS.get(league_id)
             if required and required not in name:

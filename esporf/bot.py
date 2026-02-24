@@ -22,7 +22,7 @@ from datetime import datetime
 
 from rich.console import Console
 
-from esporf.alerts.console import display_matchup_report, display_scan_summary
+from esporf.alerts.console import display_matchup_report, display_reports_by_league, display_scan_summary
 from esporf.alerts.webhooks import send_alerts
 from esporf.analysis.trends import TrendAnalyzer
 from esporf.config import settings
@@ -766,15 +766,21 @@ class EsporfBot:
         # Display results — only picks backed by real sportsbook odds
         reports_with_picks = [r for r in reports if r.best_bet is not None]
 
+        # Per-league DB counts help diagnose empty-history issues
+        league_db_counts = {
+            lid: self.db.total_matches_for_league(lid)
+            for lid in settings.tracked_league_ids
+        }
+
         display_scan_summary(
             total_matches=len(all_upcoming),
             matches_with_picks=len(reports_with_picks),
             total_trends=sum(len(r.trends) for r in reports_with_picks),
             db_total=self.db.total_matches(),
+            league_db_counts=league_db_counts,
         )
 
-        for report in reports:
-            display_matchup_report(report)
+        display_reports_by_league(reports)
 
         # Send alerts only for picks backed by real sportsbook odds.
         # Uses the content-based _match_key (players + start_time) instead

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections import defaultdict
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -11,7 +12,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from esporf.models import MatchupReport, extract_handle, extract_team
+from esporf.models import MatchupReport, extract_handle, extract_team, league_display_name
 
 console = Console()
 
@@ -142,13 +143,69 @@ def display_scan_summary(
     matches_with_picks: int,
     total_trends: int,
     db_total: int,
+    league_db_counts: dict[int, int] | None = None,
 ) -> None:
-    """One-line scan summary."""
+    """One-line scan summary with optional per-league DB counts."""
     c = "green" if matches_with_picks > 0 else "yellow"
     console.print(
         f"  [{c}]{matches_with_picks}[/] odds-backed pick(s) from "
         f"{total_matches} match(es)  [dim]|  DB: {db_total:,}[/dim]"
     )
+    if league_db_counts:
+        parts = []
+        for lid, count in sorted(league_db_counts.items()):
+            name = league_display_name(lid)
+            tag = "[green]" if count > 0 else "[red]"
+            parts.append(f"{tag}{name}: {count:,}[/]")
+        console.print(f"  [dim]{' | '.join(parts)}[/dim]")
+
+
+def display_reports_by_league(reports: list[MatchupReport]) -> None:
+    """Display reports grouped by league, with picks first and no-picks collapsed."""
+    by_league: dict[int, list[MatchupReport]] = defaultdict(list)
+    for r in reports:
+        by_league[r.match.league_id].append(r)
+
+    for lid in sorted(by_league):
+        league_reports = by_league[lid]
+        name = league_display_name(lid)
+        picks = [r for r in league_reports if r.best_bet is not None]
+        no_picks = [r for r in league_reports if r.best_bet is None]
+
+        console.print(f"\n  [bold]{name}[/bold]  [dim]({len(league_reports)} match(es))[/dim]")
+
+        # Show picks first (full detail)
+        for report in picks:
+            display_matchup_report(report)
+
+        # Collapse no-pick matches into a compact summary
+        if no_picks:
+            _display_no_pick_summary(no_picks)
+
+
+def _display_no_pick_summary(reports: list[MatchupReport]) -> None:
+    """Show no-pick matches as a compact grouped summary instead of one line each."""
+    # Group by reason
+    by_reason: dict[str, list[MatchupReport]] = defaultdict(list)
+    for r in reports:
+        if r.skip_reason:
+            by_reason[r.skip_reason].append(r)
+        elif r.has_trends and not (r.match.odds and r.match.odds.has_data):
+            by_reason["waiting for book odds"].append(r)
+        elif r.has_trends:
+            by_reason["trends but no edge vs book"].append(r)
+        else:
+            by_reason["no pick"].append(r)
+
+    for reason, group in by_reason.items():
+        if len(group) <= 2:
+            # Few enough to show individually
+            for r in group:
+                kickoff = _kickoff_est(r.match.start_time)
+                console.print(f"    [dim]{kickoff}  {r.match.display_name} — {reason}[/dim]")
+        else:
+            # Collapse into count
+            console.print(f"    [dim]{len(group)} match(es) — {reason}[/dim]")
 
 
 def display_player_stats(player: str, matches: list) -> None:
