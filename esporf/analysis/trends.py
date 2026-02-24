@@ -25,7 +25,6 @@ from esporf.models import (
     Trend,
     UpcomingMatch,
     extract_handle,
-    _poisson_over_prob,
 )
 from esporf.sources.forebet import ForebetPrediction
 from esporf.sources.totalcorner import LeagueStats
@@ -107,9 +106,9 @@ class TrendAnalyzer:
         elif match.odds and match.odds.has_data:
             check_lines = sorted(match.odds.available_lines)
         else:
-            check_lines = sorted(settings.volta_book_line_values)
+            check_lines = sorted(self.goal_lines)
             logger.debug(
-                "No real odds for %s vs %s — using default book lines: %s",
+                "No real odds for %s vs %s — using configured goal lines: %s",
                 match.home, match.away, check_lines,
             )
 

@@ -6,7 +6,7 @@ from esporf.models import League, MatchResult, MatchupReport, Trend, UpcomingMat
 class TestMatchResult:
     def _make(self, home_score=3, away_score=1) -> MatchResult:
         return MatchResult(
-            match_id="123", league_id=23114, home="Player A", away="Player B",
+            match_id="123", league_id=42649, home="Player A", away="Player B",
             home_score=home_score, away_score=away_score, start_time=1700000000,
         )
 
@@ -57,10 +57,10 @@ class TestMatchResult:
 class TestUpcomingMatch:
     def test_display_name(self):
         m = UpcomingMatch(
-            match_id="1", league_id=37298, home="X", away="Y", start_time=0
+            match_id="1", league_id=42648, home="X", away="Y", start_time=0
         )
         assert m.display_name == "X vs Y"
-        assert m.league == League.GG_LEAGUE_8MIN
+        assert m.league == League.ESOCCER_BATTLE_8MIN
 
 
 class TestTrend:
@@ -76,7 +76,7 @@ class TestTrend:
 class TestMatchupReport:
     def test_has_trends(self):
         match = UpcomingMatch(
-            match_id="1", league_id=23114, home="A", away="B", start_time=0
+            match_id="1", league_id=42648, home="A", away="B", start_time=0
         )
         assert MatchupReport(match=match, trends=[]).has_trends is False
 
@@ -90,5 +90,5 @@ class TestMatchupReport:
 class TestLeague:
     def test_display_names(self):
         assert League.GT_LEAGUES_12MIN.display_name == "GT Leagues"
-        assert League.GG_LEAGUE_8MIN.display_name == "GG League"
+        assert League.ESOCCER_BATTLE_8MIN.display_name == "GG League"
         assert League.VOLTA_6MIN.display_name == "Volta"

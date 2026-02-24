@@ -7,7 +7,6 @@ on-demand lookups (/stats, /picks, /leagues).
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -16,11 +15,10 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 
-from esporf.alerts.webhooks import _build_discord_embed, _confidence_color
+from esporf.alerts.webhooks import _build_discord_embed
 from esporf.bot import EsporfBot, _match_key
 from esporf.config import settings
-from esporf.database import MatchDatabase
-from esporf.models import MatchupReport, PickResult, TrackedPick, extract_handle, league_display_name
+from esporf.models import MatchupReport, extract_handle, league_display_name
 
 logger = logging.getLogger(__name__)
 

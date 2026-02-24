@@ -25,7 +25,7 @@ def _seed_high_scoring_h2h(db: MatchDatabase) -> None:
     for i in range(15):
         db.insert_match(MatchResult(
             match_id=f"h2h_{i}",
-            league_id=23114,
+            league_id=42648,
             home="Alpha" if i % 2 == 0 else "Bravo",
             away="Bravo" if i % 2 == 0 else "Alpha",
             home_score=4,
@@ -41,7 +41,7 @@ def _seed_dominant_player(db: MatchDatabase) -> None:
         opp = opponents[i % len(opponents)]
         db.insert_match(MatchResult(
             match_id=f"dom_{i}",
-            league_id=23114,
+            league_id=42648,
             home="Alpha",
             away=opp,
             home_score=4 if i < 12 else 1,  # wins 12/15
@@ -55,7 +55,7 @@ def _seed_low_scoring_player(db: MatchDatabase) -> None:
     for i in range(15):
         db.insert_match(MatchResult(
             match_id=f"low_{i}",
-            league_id=23114,
+            league_id=42648,
             home="Keeper",
             away=f"Opp{i}",
             home_score=2,
@@ -71,9 +71,10 @@ class TestH2HTrends:
         analyzer = TrendAnalyzer(db)
         analyzer.min_sample = 10
         analyzer.min_hit_rate = 0.70
+        analyzer.goal_lines = [2.5, 3.5, 4.5, 5.5, 6.5, 7.5]
 
         match = UpcomingMatch(
-            match_id="upcoming", league_id=23114,
+            match_id="upcoming", league_id=42648,
             home="Alpha", away="Bravo", start_time=9999,
         )
         report = analyzer.analyze_matchup(match)
@@ -87,7 +88,7 @@ class TestH2HTrends:
         """H2H where all matches are draws should surface a Draw trend."""
         for i in range(15):
             db.insert_match(MatchResult(
-                match_id=f"draw_{i}", league_id=23114,
+                match_id=f"draw_{i}", league_id=42648,
                 home="Alpha", away="Bravo",
                 home_score=2, away_score=2,
                 start_time=1000 + i * 100,
@@ -97,7 +98,7 @@ class TestH2HTrends:
         analyzer.min_hit_rate = 0.70
 
         match = UpcomingMatch(
-            match_id="upcoming", league_id=23114,
+            match_id="upcoming", league_id=42648,
             home="Alpha", away="Bravo", start_time=9999,
         )
         report = analyzer.analyze_matchup(match)
@@ -110,7 +111,7 @@ class TestH2HTrends:
         """Only 3 H2H matches should not produce any trends."""
         for i in range(3):
             db.insert_match(MatchResult(
-                match_id=f"few_{i}", league_id=23114,
+                match_id=f"few_{i}", league_id=42648,
                 home="Alpha", away="Bravo", home_score=5, away_score=4,
                 start_time=1000 + i * 100,
             ))
@@ -118,7 +119,7 @@ class TestH2HTrends:
         analyzer.min_sample = 10
 
         match = UpcomingMatch(
-            match_id="upcoming", league_id=23114,
+            match_id="upcoming", league_id=42648,
             home="Alpha", away="Bravo", start_time=9999,
         )
         report = analyzer.analyze_matchup(match)
@@ -135,7 +136,7 @@ class TestPlayerTrends:
         analyzer.min_hit_rate = 0.70
 
         match = UpcomingMatch(
-            match_id="upcoming", league_id=23114,
+            match_id="upcoming", league_id=42648,
             home="Alpha", away="SomeGuy", start_time=9999,
         )
         report = analyzer.analyze_matchup(match)
@@ -155,7 +156,7 @@ class TestPlayerTrends:
         analyzer.min_hit_rate = 0.70
 
         match = UpcomingMatch(
-            match_id="upcoming", league_id=23114,
+            match_id="upcoming", league_id=42648,
             home="Keeper", away="SomeGuy", start_time=9999,
         )
         report = analyzer.analyze_matchup(match)
@@ -174,7 +175,7 @@ class TestTrendFiltering:
         """Trends below the hit rate threshold should not appear."""
         for i in range(20):
             db.insert_match(MatchResult(
-                match_id=f"mixed_{i}", league_id=23114,
+                match_id=f"mixed_{i}", league_id=42648,
                 home="Alpha", away="Bravo",
                 home_score=4 if i < 10 else 1,
                 away_score=3 if i < 10 else 0,
@@ -186,7 +187,7 @@ class TestTrendFiltering:
         analyzer.min_hit_rate = 0.70
 
         match = UpcomingMatch(
-            match_id="upcoming", league_id=23114,
+            match_id="upcoming", league_id=42648,
             home="Alpha", away="Bravo", start_time=9999,
         )
         report = analyzer.analyze_matchup(match)
@@ -203,9 +204,10 @@ class TestTrendFiltering:
         analyzer = TrendAnalyzer(db)
         analyzer.min_sample = 10
         analyzer.min_hit_rate = 0.70
+        analyzer.goal_lines = [2.5, 3.5, 4.5, 5.5, 6.5, 7.5]
 
         match = UpcomingMatch(
-            match_id="upcoming", league_id=23114,
+            match_id="upcoming", league_id=42648,
             home="Alpha", away="Bravo", start_time=9999,
         )
         report = analyzer.analyze_matchup(match)
