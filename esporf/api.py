@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -24,7 +25,7 @@ from esporf.models import (
     league_display_name,
 )
 
-_STATIC_DIR = Path(__file__).parent / "static"
+_FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 app = FastAPI(
     title="Esporf API",
@@ -32,13 +33,41 @@ app = FastAPI(
     version="1.0.0",
 )
 
-app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+# CORS — allows the Vite dev server (port 5173) to call the API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-@app.get("/dashboard", include_in_schema=False)
-def dashboard():
-    """Serve the single-page dashboard."""
-    return FileResponse(str(_STATIC_DIR / "dashboard.html"))
+def _setup_frontend():
+    """Mount the built React frontend if the dist/ directory exists."""
+    if _FRONTEND_DIR.is_dir():
+        # Serve static assets (JS, CSS, images)
+        app.mount(
+            "/assets",
+            StaticFiles(directory=str(_FRONTEND_DIR / "assets")),
+            name="frontend-assets",
+        )
+
+        # Catch-all: serve index.html for any non-API route (SPA routing)
+        @app.get("/{path:path}", include_in_schema=False)
+        def spa_fallback(path: str):
+            # Don't intercept API doc routes
+            if path in ("docs", "redoc", "openapi.json"):
+                return None
+            index = _FRONTEND_DIR / "index.html"
+            if index.exists():
+                return FileResponse(str(index))
+            raise HTTPException(status_code=404)
+
+
+# Deferred so API routes register first, SPA catch-all registers last
+@app.on_event("startup")
+def on_startup():
+    _setup_frontend()
 
 
 def _get_db() -> MatchDatabase:
