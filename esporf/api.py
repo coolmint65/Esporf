@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from esporf.config import settings
@@ -21,11 +24,21 @@ from esporf.models import (
     league_display_name,
 )
 
+_STATIC_DIR = Path(__file__).parent / "static"
+
 app = FastAPI(
     title="Esporf API",
     description="eSoccer betting trend data — picks, stats, players, and match history.",
     version="1.0.0",
 )
+
+app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+
+@app.get("/dashboard", include_in_schema=False)
+def dashboard():
+    """Serve the single-page dashboard."""
+    return FileResponse(str(_STATIC_DIR / "dashboard.html"))
 
 
 def _get_db() -> MatchDatabase:
