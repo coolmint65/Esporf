@@ -35,6 +35,7 @@ from esporf.models import (
     TrackedPick,
     UpcomingMatch,
     extract_handle,
+    extract_team,
     _parse_line,
     _parse_spread,
 )
@@ -84,6 +85,45 @@ class EsporfBot:
         self._alerted_keys: set[str] = set()
         self._skip_webhook_alerts = skip_webhook_alerts
         self._load_alerted_keys()
+
+    # ── Name enrichment ──────────────────────────────────────────
+
+    def _enrich_team_names(self, matches: list[UpcomingMatch]) -> None:
+        """Fill in team names for matches that only have bare handles.
+
+        When AceOdds/ESportsBattle fail, BetsAPI provides Volta matches
+        with just "Senya" instead of "Germany (Senya)".  This looks up
+        each player's most recent team from the DB and patches the name.
+        """
+        # Collect handles that need enrichment
+        bare_handles: set[str] = set()
+        for m in matches:
+            if extract_team(m.home) is None:
+                bare_handles.add(extract_handle(m.home).lower())
+            if extract_team(m.away) is None:
+                bare_handles.add(extract_handle(m.away).lower())
+
+        if not bare_handles:
+            return
+
+        # Look up most recent "Team (Handle)" name for each bare handle
+        team_cache = self.db.get_latest_team_names(bare_handles)
+
+        enriched = 0
+        for m in matches:
+            if extract_team(m.home) is None:
+                full_name = team_cache.get(extract_handle(m.home).lower())
+                if full_name:
+                    m.home = full_name
+                    enriched += 1
+            if extract_team(m.away) is None:
+                full_name = team_cache.get(extract_handle(m.away).lower())
+                if full_name:
+                    m.away = full_name
+                    enriched += 1
+
+        if enriched:
+            logger.info("Enriched %d bare handle(s) with team names from DB", enriched)
 
     # ── Pick tracking ────────────────────────────────────────────
 
@@ -547,6 +587,11 @@ class EsporfBot:
                     "Volta filter: dropped %d match(es) not confirmed by ESB/AceOdds",
                     dropped,
                 )
+
+        # Enrich bare-handle names with team names from DB history.
+        # When AceOdds/ESportsBattle fail, BetsAPI matches only have handles
+        # like "Senya" — look up their last known team from the DB.
+        self._enrich_team_names(all_upcoming)
 
         # Keep matches starting within lookahead window
         lookahead = settings.schedule_lookahead

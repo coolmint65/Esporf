@@ -354,6 +354,40 @@ class MatchDatabase:
         ).fetchall()
         return [self._row_to_match(r) for r in rows]
 
+    def get_latest_team_names(self, handles: set[str]) -> dict[str, str]:
+        """Look up the most recent 'Team (Handle)' name for bare handles.
+
+        Returns a dict mapping lowercase handle → full 'Team (Handle)' string
+        from the most recent match in the DB.  Only returns entries where a
+        team name is present (i.e. name contains parentheses).
+        """
+        if not handles:
+            return {}
+
+        conn = self._get_conn()
+        result: dict[str, str] = {}
+
+        # Query recent matches and extract team names for requested handles
+        for handle in handles:
+            pattern = f"%({handle})%"
+            row = conn.execute(
+                """SELECT home, away FROM matches
+                   WHERE LOWER(home) LIKE LOWER(?) OR LOWER(away) LIKE LOWER(?)
+                   ORDER BY start_time DESC LIMIT 1""",
+                (pattern, pattern),
+            ).fetchone()
+            if not row:
+                continue
+
+            # Check which side matches and has a team name
+            for name in (row["home"], row["away"]):
+                h = extract_handle(name).lower()
+                if h == handle and "(" in name:
+                    result[handle] = name
+                    break
+
+        return result
+
     def get_all_players(self, league_id: int | None = None) -> list[str]:
         """Get a list of all unique players in the database."""
         conn = self._get_conn()
