@@ -53,11 +53,18 @@ def _match_key(m: UpcomingMatch) -> str:
     """Normalize a match to a dedup key based on players + start time.
 
     Handles are lowercased so that AceOdds "GLORY" matches BetsAPI "Glory".
+    Start time is rounded to the nearest 10-minute mark so that the same
+    match from different sources (which can report times up to ~5 min
+    apart) produces the same key.  Without rounding, a 1-second difference
+    in start_time creates entirely different keys, letting duplicates
+    through every dedup layer — schedule building, alert sending, and
+    pick recording.
     """
     h = extract_handle(m.home).lower()
     a = extract_handle(m.away).lower()
     pair = tuple(sorted([h, a]))
-    return f"{pair[0]}_{pair[1]}_{m.start_time}"
+    rounded_time = round(m.start_time / 600) * 600
+    return f"{pair[0]}_{pair[1]}_{rounded_time}"
 
 
 class EsporfBot:
