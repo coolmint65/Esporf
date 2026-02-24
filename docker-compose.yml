@@ -5,6 +5,8 @@ services:
     restart: unless-stopped
     env_file: .env
     command: ["discord"]
+    stop_signal: SIGINT
+    stop_grace_period: 15s
     volumes:
       - esporf-data:/app/data
     logging:

@@ -165,6 +165,12 @@ class EsporfDiscordBot(discord.Client):
 
     async def close(self) -> None:
         self.scan_loop.cancel()
+        # Disconnect from the Discord gateway FIRST so the bot immediately
+        # shows as offline.  Scanner cleanup can take several seconds (HTTP
+        # session drains, DB flush) and Docker's default stop timeout is
+        # only 10 s — if we clean up first, the gateway close may never
+        # execute before Docker sends SIGKILL.
+        await super().close()
         await self.scanner.api.close()
         await self.scanner.esb.close()
         await self.scanner.ace.close()
@@ -172,7 +178,6 @@ class EsporfDiscordBot(discord.Client):
         await self.scanner.tc.close()
         await self.scanner.forebet.close()
         self.scanner.db.close()
-        await super().close()
 
 
 # ── Slash commands ────────────────────────────────────────────

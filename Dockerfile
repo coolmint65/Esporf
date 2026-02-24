@@ -16,5 +16,7 @@ USER esporf
 
 VOLUME ["/app/data"]
 
+STOPSIGNAL SIGINT
+
 ENTRYPOINT ["esporf"]
 CMD ["run"]
