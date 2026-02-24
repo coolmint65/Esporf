@@ -736,28 +736,34 @@ class EsporfBot:
             )
             reports.append(report)
 
-        # Log GT league diagnostic — surface why picks are/aren't generated
+        # Log diagnostic for non-Volta leagues — surface why picks are/aren't generated
+        _VOLTA = 38439
         for r in reports:
-            if r.match.league_id in NO_TOTALS_LEAGUES:
-                has_odds = r.match.odds and r.match.odds.has_data
-                has_ml = r.match.odds and r.match.odds.moneyline if has_odds else False
-                has_spreads = r.match.odds and r.match.odds.spreads if has_odds else False
-                logger.info(
-                    "GT diagnostic: %s vs %s — odds=%s ml=%s spreads=%s "
-                    "trends=%d best_bet=%s",
-                    extract_handle(r.match.home),
-                    extract_handle(r.match.away),
-                    has_odds, bool(has_ml), bool(has_spreads),
-                    len(r.trends),
-                    r.best_bet.market if r.best_bet else "None",
-                )
-                if r.trends and not r.best_bet:
-                    for t in r.trends:
-                        logger.info(
-                            "  GT trend: %s — %.0f%% (%d/%d)",
-                            t.category, t.hit_rate * 100,
-                            t.hits, t.sample_size,
-                        )
+            if r.match.league_id == _VOLTA:
+                continue
+            odds = r.match.odds
+            has_odds = odds is not None and odds.has_data
+            ou_lines = sorted(ol.line for ol in odds.total_lines) if has_odds and odds.total_lines else []
+            has_ml = bool(odds and odds.moneyline) if has_odds else False
+            spread_vals = sorted(s.handicap for s in odds.spreads) if has_odds and odds.spreads else []
+            league_tag = "GT" if r.match.league_id in NO_TOTALS_LEAGUES else "GG"
+            logger.info(
+                "%s diagnostic: %s vs %s — odds=%s O/U=%s ml=%s spreads=%s "
+                "trends=%d best_bet=%s",
+                league_tag,
+                extract_handle(r.match.home),
+                extract_handle(r.match.away),
+                has_odds, ou_lines, has_ml, spread_vals,
+                len(r.trends),
+                r.best_bet.market if r.best_bet else "None",
+            )
+            if r.trends and not r.best_bet:
+                for t in r.trends:
+                    logger.info(
+                        "  %s trend: %s — %.0f%% (%d/%d)",
+                        league_tag, t.category, t.hit_rate * 100,
+                        t.hits, t.sample_size,
+                    )
 
         # Display results — only picks backed by real sportsbook odds
         reports_with_picks = [r for r in reports if r.best_bet is not None]
