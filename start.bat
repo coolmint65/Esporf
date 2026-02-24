@@ -5,6 +5,10 @@ echo   Esporf - eSoccer Trend Analyzer
 echo ========================================
 echo.
 
+:: Start the bot (scanner) in a new window
+echo Starting bot scanner...
+start "Esporf Bot" cmd /k "cd /d %~dp0 && python -m esporf run"
+
 :: Start the API server in a new window
 echo Starting API server on port 8000...
 start "Esporf API" cmd /k "cd /d %~dp0 && python -m uvicorn esporf.api:app --host 127.0.0.1 --port 8000"
@@ -24,10 +28,11 @@ start http://localhost:5173
 echo.
 echo ========================================
 echo   Everything is running!
+echo   Bot:      Scanning for picks
 echo   Frontend: http://localhost:5173
 echo   API:      http://localhost:8000
 echo   API Docs: http://localhost:8000/docs
 echo ========================================
 echo.
-echo Close the other two windows to stop.
+echo Close the other windows to stop.
 pause
