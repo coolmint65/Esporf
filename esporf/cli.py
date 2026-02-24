@@ -72,6 +72,17 @@ def main() -> None:
         "discord", help="Run as a Discord bot with slash commands"
     )
 
+    # `esporf api` — start the REST API server
+    api_parser = subparsers.add_parser(
+        "api", help="Start the REST API server (docs at /docs)"
+    )
+    api_parser.add_argument(
+        "--host", type=str, default="0.0.0.0", help="Bind address (default: 0.0.0.0)"
+    )
+    api_parser.add_argument(
+        "--port", type=int, default=8000, help="Port to listen on (default: 8000)"
+    )
+
     args = parser.parse_args()
     setup_logging(args.verbose)
 
@@ -109,6 +120,15 @@ def main() -> None:
         from esporf.discord_bot import run_discord_bot
 
         run_discord_bot()
+
+    elif args.command == "api":
+        import uvicorn
+
+        console.print(
+            f"[bold green]Starting Esporf API on {args.host}:{args.port}[/bold green]"
+        )
+        console.print(f"[dim]Docs: http://{args.host}:{args.port}/docs[/dim]")
+        uvicorn.run("esporf.api:app", host=args.host, port=args.port, log_level="info")
 
 
 async def _backfill(pages: int) -> None:
