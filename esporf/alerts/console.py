@@ -11,7 +11,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from esporf.models import MatchupReport, extract_handle
+from esporf.models import MatchupReport, extract_handle, extract_team
 
 console = Console()
 
@@ -113,11 +113,16 @@ def display_matchup_report(report: MatchupReport) -> None:
     if context_parts:
         body += f"\n[dim]{' | '.join(context_parts)}[/dim]"
 
-    home_display = extract_handle(match.home)
-    away_display = extract_handle(match.away)
+    home_handle = extract_handle(match.home)
+    away_handle = extract_handle(match.away)
+    home_team = extract_team(match.home)
+    away_team = extract_team(match.away)
+
+    home_display = f"[bold]{home_handle}[/] [dim]{home_team}[/]" if home_team else f"[bold]{home_handle}[/]"
+    away_display = f"[bold]{away_handle}[/] [dim]{away_team}[/]" if away_team else f"[bold]{away_handle}[/]"
 
     title = (
-        f"[bold]{home_display}[/] vs [bold]{away_display}[/]  "
+        f"{home_display} vs {away_display}  "
         f"[dim]| {kickoff} ({time_tag})[/dim]"
     )
 

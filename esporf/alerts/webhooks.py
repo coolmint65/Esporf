@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from esporf.config import settings
-from esporf.models import MatchupReport, extract_handle, league_display_name
+from esporf.models import MatchupReport, extract_handle, extract_team, league_display_name
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +55,13 @@ def _build_discord_embed(report: MatchupReport) -> dict:
     total_hits = sum(t.hits for t in pick.supporting_trends)
     total_sample = sum(t.sample_size for t in pick.supporting_trends)
 
-    home_display = extract_handle(match.home)
-    away_display = extract_handle(match.away)
+    home_handle = extract_handle(match.home)
+    away_handle = extract_handle(match.away)
+    home_team = extract_team(match.home)
+    away_team = extract_team(match.away)
+
+    home_display = f"{home_handle} ({home_team})" if home_team else home_handle
+    away_display = f"{away_handle} ({away_team})" if away_team else away_handle
 
     lines = [
         f"### {home_display}  vs  {away_display}",

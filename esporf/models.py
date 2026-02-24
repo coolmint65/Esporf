@@ -25,6 +25,21 @@ def extract_handle(name: str) -> str:
     return m.group(1) if m else name
 
 
+def extract_team(name: str) -> str | None:
+    """Extract the team name from a 'Team (Handle)' string.
+
+    Returns the team portion if present, otherwise None.
+    Examples:
+        'Bayer 04 (Sheva)' → 'Bayer 04'
+        'Arsenal (Sheva)'  → 'Arsenal'
+        'Sheva'            → None
+    """
+    m = _HANDLE_RE.search(name)
+    if m:
+        return name[: m.start()].strip()
+    return None
+
+
 def _same_player(a: str, b: str) -> bool:
     """Check if two player strings refer to the same player by handle."""
     return extract_handle(a) == extract_handle(b)
