@@ -166,30 +166,45 @@ class MatchDatabase:
             conn.execute(idx_sql)
         conn.commit()
 
-    @staticmethod
-    def _deduplicate_picks(conn: sqlite3.Connection) -> None:
-        """Remove duplicate picks (same match_id + market), keeping the oldest.
+    def _deduplicate_picks(self, conn: sqlite3.Connection) -> None:
+        """Remove duplicate picks, keeping the oldest per logical match.
 
-        Required before the UNIQUE index can be created on existing databases
-        that accumulated duplicates from restarts.
+        Duplicates happen when the bot restarts and re-records picks for
+        the same match.  The match_id can differ between runs (e.g. kambi_
+        vs BetsAPI numeric ID), so we group by player handles + approximate
+        start time + market instead.
         """
-        dupes = conn.execute(
-            """SELECT match_id, market, MIN(id) as keep_id, COUNT(*) as cnt
-               FROM picks
-               GROUP BY match_id, market
-               HAVING cnt > 1"""
+        rows = conn.execute(
+            "SELECT id, home, away, start_time, market FROM picks ORDER BY id ASC"
         ).fetchall()
-        if not dupes:
+        if not rows:
             return
-        total_removed = 0
-        for row in dupes:
-            cur = conn.execute(
-                "DELETE FROM picks WHERE match_id = ? AND market = ? AND id != ?",
-                (row["match_id"], row["market"], row["keep_id"]),
-            )
-            total_removed += cur.rowcount
+
+        seen: dict[str, int] = {}  # dedup_key → first row id
+        to_delete: list[int] = []
+
+        for r in rows:
+            h = extract_handle(r["home"]).lower()
+            a = extract_handle(r["away"]).lower()
+            pair = tuple(sorted([h, a]))
+            rounded_time = round(r["start_time"] / 600) * 600
+            key = f"{pair[0]}_{pair[1]}_{rounded_time}_{r['market']}"
+
+            if key in seen:
+                to_delete.append(r["id"])
+            else:
+                seen[key] = r["id"]
+
+        if not to_delete:
+            return
+
+        # Delete in batches
+        for i in range(0, len(to_delete), 100):
+            batch = to_delete[i:i + 100]
+            placeholders = ",".join("?" * len(batch))
+            conn.execute(f"DELETE FROM picks WHERE id IN ({placeholders})", batch)
         conn.commit()
-        logger.info("Deduplicated picks: removed %d duplicate row(s)", total_removed)
+        logger.info("Deduplicated picks: removed %d duplicate row(s)", len(to_delete))
 
     def close(self) -> None:
         if self._conn:
