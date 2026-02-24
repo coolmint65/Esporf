@@ -84,6 +84,8 @@ export default function Dashboard() {
                   <YAxis tick={{ fill: '#8b90a5', fontSize: 12 }} axisLine={false} tickLine={false} />
                   <Tooltip
                     contentStyle={{ background: '#1a1d27', border: '1px solid #2e3245', borderRadius: 8, fontSize: 13 }}
+                    itemStyle={{ color: '#e1e4ed' }}
+                    labelStyle={{ color: '#8b90a5' }}
                     formatter={(v, name) => [v.toLocaleString(), name === 'total_matches' ? 'Matches' : name]}
                   />
                   <Bar dataKey="total_matches" radius={[6, 6, 0, 0]}>
@@ -106,6 +108,8 @@ export default function Dashboard() {
                   <YAxis tick={{ fill: '#8b90a5', fontSize: 12 }} axisLine={false} tickLine={false} tickFormatter={v => `${v}u`} />
                   <Tooltip
                     contentStyle={{ background: '#1a1d27', border: '1px solid #2e3245', borderRadius: 8, fontSize: 13 }}
+                    itemStyle={{ color: '#e1e4ed' }}
+                    labelStyle={{ color: '#8b90a5' }}
                     formatter={(v) => [`${v >= 0 ? '+' : ''}${v}u`, 'Profit']}
                   />
                   <Bar dataKey="profit" radius={[6, 6, 0, 0]}>

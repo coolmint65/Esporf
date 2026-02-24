@@ -390,20 +390,33 @@ def get_stats_breakdown():
         db_league_ids = {r["league_id"] for r in db_league_rows}
         all_league_ids = db_league_ids | {l.value for l in League}
 
-        by_league = []
+        # Merge league IDs that share the same display name (e.g. legacy + current)
+        name_to_ids: dict[str, list[int]] = {}
         for lid in sorted(all_league_ids):
-            match_count = db.total_matches_for_league(lid)
-            s = db.get_pick_summary(league_id=lid)
-            total = s["total"]
-            win_rate = s["wins"] / total if total > 0 else None
+            name = league_display_name(lid)
+            name_to_ids.setdefault(name, []).append(lid)
+
+        by_league = []
+        for name, lids in name_to_ids.items():
+            match_count = sum(db.total_matches_for_league(lid) for lid in lids)
+            wins = losses = pushes = 0
+            profit = 0.0
+            for lid in lids:
+                s = db.get_pick_summary(league_id=lid)
+                wins += s["wins"]
+                losses += s["losses"]
+                pushes += s["pushes"]
+                profit += s["profit"]
+            total = wins + losses + pushes
+            win_rate = wins / total if total > 0 else None
             by_league.append(LeagueStatsResponse(
-                league=league_display_name(lid),
-                league_id=lid,
-                record=f"{s['wins']}-{s['losses']}" + (f"-{s['pushes']}" if s["pushes"] else ""),
-                wins=s["wins"],
-                losses=s["losses"],
-                profit=round(s["profit"], 2),
-                profit_display=f"{'+' if s['profit'] >= 0 else ''}{s['profit']:.1f}u",
+                league=name,
+                league_id=lids[0],
+                record=f"{wins}-{losses}" + (f"-{pushes}" if pushes else ""),
+                wins=wins,
+                losses=losses,
+                profit=round(profit, 2),
+                profit_display=f"{'+' if profit >= 0 else ''}{profit:.1f}u",
                 win_rate=win_rate,
                 win_rate_pct=f"{win_rate:.1%}" if win_rate is not None else "N/A",
                 total_matches=match_count,
@@ -533,10 +546,12 @@ def get_pick_history(
     try:
         all_picks = db.get_all_picks(limit=limit * 3, league_id=league_id)
 
-        # Apply filters
+        # Apply filters — always exclude pending (live) picks from history
         filtered = []
         cutoff = int(time.time()) - (days * 86400) if days else 0
         for p in all_picks:
+            if p.result == PickResult.PENDING:
+                continue
             if result and p.result.value != result:
                 continue
             if days and p.created_at < cutoff:
@@ -769,20 +784,33 @@ def get_leagues():
         db_league_ids = {r["league_id"] for r in db_league_rows}
         all_league_ids = db_league_ids | {l.value for l in League}
 
-        results = []
+        # Merge league IDs that share the same display name (e.g. legacy + current)
+        name_to_ids: dict[str, list[int]] = {}
         for lid in sorted(all_league_ids):
-            match_count = db.total_matches_for_league(lid)
-            s = db.get_pick_summary(league_id=lid)
-            total = s["total"]
-            win_rate = s["wins"] / total if total > 0 else None
+            name = league_display_name(lid)
+            name_to_ids.setdefault(name, []).append(lid)
+
+        results = []
+        for name, lids in name_to_ids.items():
+            match_count = sum(db.total_matches_for_league(lid) for lid in lids)
+            wins = losses = pushes = 0
+            profit = 0.0
+            for lid in lids:
+                s = db.get_pick_summary(league_id=lid)
+                wins += s["wins"]
+                losses += s["losses"]
+                pushes += s["pushes"]
+                profit += s["profit"]
+            total = wins + losses + pushes
+            win_rate = wins / total if total > 0 else None
             results.append(LeagueStatsResponse(
-                league=league_display_name(lid),
-                league_id=lid,
-                record=f"{s['wins']}-{s['losses']}" + (f"-{s['pushes']}" if s["pushes"] else ""),
-                wins=s["wins"],
-                losses=s["losses"],
-                profit=round(s["profit"], 2),
-                profit_display=f"{'+' if s['profit'] >= 0 else ''}{s['profit']:.1f}u",
+                league=name,
+                league_id=lids[0],
+                record=f"{wins}-{losses}" + (f"-{pushes}" if pushes else ""),
+                wins=wins,
+                losses=losses,
+                profit=round(profit, 2),
+                profit_display=f"{'+' if profit >= 0 else ''}{profit:.1f}u",
                 win_rate=win_rate,
                 win_rate_pct=f"{win_rate:.1%}" if win_rate is not None else "N/A",
                 total_matches=match_count,
