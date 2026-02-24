@@ -36,6 +36,15 @@ else
     echo "    Docker already installed, skipping."
 fi
 
+echo "==> Installing nginx (if not present)"
+if ! command -v nginx &>/dev/null; then
+    apt-get install -y -qq nginx
+    systemctl enable --now nginx
+    echo "    nginx installed."
+else
+    echo "    nginx already installed, skipping."
+fi
+
 echo "==> Cloning Esporf"
 if [ -d "$INSTALL_DIR/.git" ]; then
     echo "    Repo already exists at $INSTALL_DIR, pulling latest"
@@ -54,6 +63,13 @@ else
     echo "    .env already exists, keeping it."
 fi
 
+echo "==> Configuring nginx"
+cp "$INSTALL_DIR/deploy/nginx-esporf.conf" /etc/nginx/sites-available/esporf
+ln -sf /etc/nginx/sites-available/esporf /etc/nginx/sites-enabled/esporf
+rm -f /etc/nginx/sites-enabled/default
+nginx -t && systemctl reload nginx
+echo "    nginx configured — site accessible on port 80."
+
 echo "==> Installing systemd service"
 cp "$INSTALL_DIR/deploy/esporf.service" /etc/systemd/system/esporf.service
 systemctl daemon-reload
@@ -70,11 +86,16 @@ echo "============================================"
 echo "  Esporf is ready!"
 echo "============================================"
 echo ""
-echo "  esporf start     Start the bot"
-echo "  esporf stop      Stop the bot"
-echo "  esporf restart   Restart the bot"
+echo "  1. Edit your .env:  nano $INSTALL_DIR/.env"
+echo "  2. Start it:        esporf start"
+echo ""
+echo "  esporf start     Start bot + API + Discord"
+echo "  esporf stop      Stop everything"
+echo "  esporf restart   Restart everything"
 echo "  esporf status    Check if it's running"
 echo "  esporf logs      Tail live logs"
 echo "  esporf update    Pull latest code and restart"
 echo "  esporf config    Edit .env settings"
+echo ""
+echo "  Website: http://$(hostname -I | awk '{print $1}')"
 echo ""

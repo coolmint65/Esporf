@@ -1,8 +1,43 @@
 services:
+  # Scanner bot — continuously finds matches and generates picks
+  esporf-bot:
+    build: .
+    container_name: esporf-bot
+    restart: unless-stopped
+    env_file: .env
+    command: ["run"]
+    stop_signal: SIGINT
+    stop_grace_period: 15s
+    volumes:
+      - esporf-data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # REST API + built frontend (served via FastAPI SPA fallback)
+  esporf-api:
+    build: .
+    container_name: esporf-api
+    restart: unless-stopped
+    env_file: .env
+    command: ["api", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - esporf-data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Discord bot — slash commands and daily summaries
   esporf-discord:
     build: .
     container_name: esporf-discord
-    restart: "no"
+    restart: unless-stopped
     env_file: .env
     command: ["discord"]
     stop_signal: SIGINT

@@ -8,7 +8,8 @@ Type=simple
 WorkingDirectory=/opt/esporf
 ExecStart=/usr/bin/docker compose up --build
 ExecStop=/usr/bin/docker compose down
-Restart=no
+Restart=on-failure
+RestartSec=10
 
 # Hardening
 NoNewPrivileges=true
