@@ -110,6 +110,12 @@ def display_matchup_report(report: MatchupReport) -> None:
     if ext_labels:
         context_parts.append(f"+ {', '.join(ext_labels)}")
 
+    # Show form quality when it deviates from baseline
+    if report.form_modifier >= 1.10:
+        context_parts.append(f"[green]Form: {report.form_modifier:.2f}x[/green]")
+    elif report.form_modifier <= 0.90:
+        context_parts.append(f"[yellow]Form: {report.form_modifier:.2f}x[/yellow]")
+
     if context_parts:
         body += f"\n[dim]{' | '.join(context_parts)}[/dim]"
 

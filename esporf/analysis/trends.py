@@ -22,6 +22,7 @@ from esporf.models import (
     NO_TOTALS_LEAGUES,
     MatchResult,
     MatchupReport,
+    PlayerTier,
     Trend,
     UpcomingMatch,
     extract_handle,
@@ -35,11 +36,6 @@ logger = logging.getLogger(__name__)
 class TrendAnalyzer:
     """Analyzes match history to find qualifying trends for a matchup."""
 
-    # Recent win-rate below this threshold → player is "out of form"
-    # and the matchup is skipped entirely.  Requires at least 10 recent
-    # matches so brand-new players aren't unfairly gated.
-    MIN_RECENT_WIN_RATE = 0.25
-
     def __init__(self, db: MatchDatabase):
         self.db = db
         self.min_hit_rate = settings.min_hit_rate
@@ -47,17 +43,17 @@ class TrendAnalyzer:
         self.last_n = settings.last_n_matches
         self.goal_lines = settings.goal_line_values
 
-    def _player_out_of_form(self, player: str, league_id: int) -> bool:
-        """Check if a player's recent form is too poor to pick.
+    def _get_player_tier(self, player: str, league_id: int) -> tuple[PlayerTier, float]:
+        """Evaluate a player's current tier and form modifier.
 
-        Returns True if the player has enough history and their last-10
-        win rate is below MIN_RECENT_WIN_RATE.
+        Returns (tier, form_modifier). BLOCKED tier means no picks.
+        Other tiers pass through with their modifier applied to confidence.
         """
         handle = extract_handle(player)
         form = self.db.get_player_form(handle, league_id=league_id)
-        if form is None or form.recent_matches < 10:
-            return False  # not enough data to judge — let them through
-        return form.recent_win_rate < self.MIN_RECENT_WIN_RATE
+        if form is None:
+            return PlayerTier.NEW, PlayerTier.NEW.base_modifier
+        return form.tier, form.form_modifier
 
     def analyze_matchup(
         self,
@@ -71,25 +67,39 @@ class TrendAnalyzer:
         1. When real odds are available → only analyze lines the book offers
         2. When no odds → use default Volta book lines
 
-        Players whose recent form (last 10 matches) has dropped sharply
-        are skipped entirely — no trends, no picks.
+        Players are dynamically tiered (ELITE → SOLID → WATCHLIST → BLOCKED)
+        based on recent form.  BLOCKED players are skipped entirely; others
+        pass through with a form modifier that scales confidence scoring.
 
         External data (TotalCorner, Forebet) adds independent trend signals
         when available, boosting agreement and confidence scores.
         """
-        # ── Form gate: skip players in poor recent form ──
-        if self._player_out_of_form(match.home, match.league_id):
+        # ── Dynamic form evaluation ──
+        home_tier, home_mod = self._get_player_tier(match.home, match.league_id)
+        away_tier, away_mod = self._get_player_tier(match.away, match.league_id)
+
+        if home_tier == PlayerTier.BLOCKED:
             logger.info(
-                "Skipping %s vs %s — %s is out of form",
+                "Skipping %s vs %s — %s is BLOCKED (poor form)",
                 match.home, match.away, extract_handle(match.home),
             )
             return MatchupReport(match=match, trends=[], avg_goals=0.0)
-        if self._player_out_of_form(match.away, match.league_id):
+        if away_tier == PlayerTier.BLOCKED:
             logger.info(
-                "Skipping %s vs %s — %s is out of form",
+                "Skipping %s vs %s — %s is BLOCKED (poor form)",
                 match.home, match.away, extract_handle(match.away),
             )
             return MatchupReport(match=match, trends=[], avg_goals=0.0)
+
+        # Combined modifier: average of both players' form quality
+        combined_modifier = (home_mod + away_mod) / 2.0
+
+        logger.debug(
+            "%s [%s %.2f] vs %s [%s %.2f] → modifier %.2f",
+            extract_handle(match.home), home_tier.label, home_mod,
+            extract_handle(match.away), away_tier.label, away_mod,
+            combined_modifier,
+        )
 
         avg_goals = self._compute_matchup_avg_goals(
             match.home, match.away, match.league_id, tc_stats=tc_stats
@@ -149,7 +159,10 @@ class TrendAnalyzer:
         # Sort by hit rate descending, then sample size descending
         trends.sort(key=lambda t: (t.hit_rate, t.sample_size), reverse=True)
 
-        return MatchupReport(match=match, trends=trends, avg_goals=avg_goals)
+        return MatchupReport(
+            match=match, trends=trends, avg_goals=avg_goals,
+            form_modifier=combined_modifier,
+        )
 
     # ── Head-to-Head Trends ──────────────────────────────────────────
 

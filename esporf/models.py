@@ -408,6 +408,91 @@ class PlayerForm:
             return "falling"
         return "stable"
 
+    @property
+    def tier(self) -> PlayerTier:
+        """Dynamic tier based on recent form, sample size, and trend direction.
+
+        Tiers control which players get picks and at what confidence level.
+        Players naturally move between tiers as form changes — a slumping
+        elite can drop to WATCHLIST, a rising grinder can climb to ELITE.
+        """
+        # Not enough data — benefit of the doubt
+        if self.recent_matches < 5:
+            return PlayerTier.NEW
+
+        # Hard block: sustained poor form
+        if self.recent_matches >= 10 and self.recent_win_rate < 0.25:
+            return PlayerTier.BLOCKED
+
+        # Elite: strong recent form, not trending down
+        if (
+            self.recent_win_rate >= 0.45
+            and self.recent_matches >= 8
+            and self.form_trend != "falling"
+        ):
+            return PlayerTier.ELITE
+
+        # Solid: good recent form
+        if self.recent_win_rate >= 0.35 and self.recent_matches >= 8:
+            return PlayerTier.SOLID
+
+        # Watchlist: marginal form or thin sample
+        return PlayerTier.WATCHLIST
+
+    @property
+    def form_modifier(self) -> float:
+        """Confidence multiplier based on current tier and form trend.
+
+        Applied to the final confidence score so elite-form players
+        produce higher-conviction (and higher-unit) picks while
+        watchlist players get scaled back.
+        """
+        base = self.tier.base_modifier
+
+        # Form trend adjustment
+        trend_adj = {
+            "rising": 0.05,
+            "stable": 0.00,
+            "falling": -0.05,
+            "insufficient": -0.02,
+        }.get(self.form_trend, 0.0)
+
+        return max(0.0, base + trend_adj)
+
+
+class PlayerTier(Enum):
+    """Dynamic player evaluation tier.
+
+    Players move between tiers automatically as form data updates.
+    Each tier has a base confidence modifier that scales pick sizing.
+    """
+
+    ELITE = "elite"          # Strong recent form — confidence boost
+    SOLID = "solid"          # Good form — baseline confidence
+    WATCHLIST = "watchlist"  # Marginal form — reduced confidence
+    BLOCKED = "blocked"      # Poor form — no picks
+    NEW = "new"              # Insufficient data — slight caution
+
+    @property
+    def base_modifier(self) -> float:
+        return {
+            PlayerTier.ELITE: 1.15,
+            PlayerTier.SOLID: 1.00,
+            PlayerTier.WATCHLIST: 0.85,
+            PlayerTier.BLOCKED: 0.00,
+            PlayerTier.NEW: 0.90,
+        }[self]
+
+    @property
+    def label(self) -> str:
+        return {
+            PlayerTier.ELITE: "Elite",
+            PlayerTier.SOLID: "Solid",
+            PlayerTier.WATCHLIST: "Watchlist",
+            PlayerTier.BLOCKED: "Blocked",
+            PlayerTier.NEW: "New",
+        }[self]
+
 
 @dataclass
 class UpcomingMatch:
@@ -612,6 +697,7 @@ class MatchupReport:
     trends: list[Trend]
     generated_at: float = field(default_factory=time.time)
     avg_goals: float | None = None  # match-specific expected total goals
+    form_modifier: float = 1.0  # combined form quality of both players
 
     @property
     def has_trends(self) -> bool:
@@ -834,9 +920,13 @@ class MatchupReport:
             f"({sources}) — {top_rate:.0%} hit rate, {best_edge:.0%} edge"
         )
 
+        # Apply form modifier — elite-form players boost confidence
+        # (and unit sizing), poor-form players scale it down.
+        adjusted_score = best_score * self.form_modifier
+
         return BetPick(
             market=best_market,
-            confidence=best_score,
+            confidence=adjusted_score,
             supporting_trends=best_trends,
             reason=reason,
             odds_line=best_odds_line,

@@ -63,13 +63,20 @@ def _build_discord_embed(report: MatchupReport) -> dict:
     home_display = f"{home_handle} ({home_team})" if home_team else home_handle
     away_display = f"{away_handle} ({away_team})" if away_team else away_handle
 
+    # Show form quality indicator when it deviates from baseline
+    form_str = ""
+    if report.form_modifier >= 1.10:
+        form_str = f"  |  Form: {report.form_modifier:.2f}x"
+    elif report.form_modifier <= 0.90:
+        form_str = f"  |  Form: {report.form_modifier:.2f}x"
+
     lines = [
         f"### {home_display}  vs  {away_display}",
         f"### Kickoff: <t:{ts}:t>  (<t:{ts}:R>)",
         "",
         f"## {pick.market.upper()}  —  {pick.units_display}",
         "",
-        f"**{top_rate:.0%}** hit rate  ({total_hits}/{total_sample})",
+        f"**{top_rate:.0%}** hit rate  ({total_hits}/{total_sample}){form_str}",
     ]
 
     color = _confidence_color(top_rate)
