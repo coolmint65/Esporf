@@ -37,7 +37,9 @@ def display_matchup_report(report: MatchupReport) -> None:
 
     if not pick:
         has_odds = match.odds and match.odds.has_data
-        if report.has_trends and not has_odds:
+        if report.skip_reason:
+            console.print(f"  [dim]{kickoff}  {match.display_name} — {report.skip_reason}[/dim]")
+        elif report.has_trends and not has_odds:
             console.print(f"  [dim]{kickoff}  {match.display_name} — waiting for book odds[/dim]")
         elif report.has_trends:
             console.print(f"  [dim]{kickoff}  {match.display_name} — trends but no edge vs book[/dim]")

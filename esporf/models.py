@@ -420,8 +420,9 @@ class PlayerForm:
         if self.recent_matches < 5:
             return PlayerTier.NEW
 
-        # Hard block: sustained poor form
-        if self.recent_matches >= 10 and self.recent_win_rate < 0.25:
+        # Hard block: sustained poor form — only block players who are
+        # clearly losing (< 20% recent win rate over 10+ matches).
+        if self.recent_matches >= 10 and self.recent_win_rate < 0.20:
             return PlayerTier.BLOCKED
 
         # Elite: strong recent form, not trending down
@@ -698,6 +699,7 @@ class MatchupReport:
     generated_at: float = field(default_factory=time.time)
     avg_goals: float | None = None  # match-specific expected total goals
     form_modifier: float = 1.0  # combined form quality of both players
+    skip_reason: str | None = None  # set when a player is BLOCKED or skipped
 
     @property
     def has_trends(self) -> bool:

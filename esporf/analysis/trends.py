@@ -79,17 +79,25 @@ class TrendAnalyzer:
         away_tier, away_mod = self._get_player_tier(match.away, match.league_id)
 
         if home_tier == PlayerTier.BLOCKED:
+            handle = extract_handle(match.home)
             logger.info(
                 "Skipping %s vs %s — %s is BLOCKED (poor form)",
-                match.home, match.away, extract_handle(match.home),
+                match.home, match.away, handle,
             )
-            return MatchupReport(match=match, trends=[], avg_goals=0.0)
+            return MatchupReport(
+                match=match, trends=[], avg_goals=0.0,
+                skip_reason=f"{handle} is out of form",
+            )
         if away_tier == PlayerTier.BLOCKED:
+            handle = extract_handle(match.away)
             logger.info(
                 "Skipping %s vs %s — %s is BLOCKED (poor form)",
-                match.home, match.away, extract_handle(match.away),
+                match.home, match.away, handle,
             )
-            return MatchupReport(match=match, trends=[], avg_goals=0.0)
+            return MatchupReport(
+                match=match, trends=[], avg_goals=0.0,
+                skip_reason=f"{handle} is out of form",
+            )
 
         # Combined modifier: average of both players' form quality
         combined_modifier = (home_mod + away_mod) / 2.0
