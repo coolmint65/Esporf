@@ -42,6 +42,12 @@ app.add_middleware(
 )
 
 
+_API_PREFIXES = (
+    "stats", "picks", "player", "players", "h2h",
+    "matches", "leagues", "scan", "docs", "redoc", "openapi.json",
+)
+
+
 def _setup_frontend():
     """Mount the built React frontend if the dist/ directory exists."""
     if _FRONTEND_DIR.is_dir():
@@ -55,9 +61,10 @@ def _setup_frontend():
         # Catch-all: serve index.html for any non-API route (SPA routing)
         @app.get("/{path:path}", include_in_schema=False)
         def spa_fallback(path: str):
-            # Don't intercept API doc routes
-            if path in ("docs", "redoc", "openapi.json"):
-                return None
+            # Don't intercept API routes
+            first_segment = path.split("/")[0]
+            if first_segment in _API_PREFIXES:
+                raise HTTPException(status_code=404)
             index = _FRONTEND_DIR / "index.html"
             if index.exists():
                 return FileResponse(str(index))
