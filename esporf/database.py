@@ -84,6 +84,42 @@ CREATE TABLE IF NOT EXISTS player_form (
 );
 """
 
+CREATE_ODDS_SNAPSHOTS_TABLE = """
+CREATE TABLE IF NOT EXISTS odds_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_id TEXT NOT NULL,
+    league_id INTEGER NOT NULL,
+    home TEXT NOT NULL,
+    away TEXT NOT NULL,
+    start_time INTEGER NOT NULL,
+    line REAL,
+    over_odds REAL,
+    under_odds REAL,
+    home_ml REAL,
+    draw_ml REAL,
+    away_ml REAL,
+    spread REAL,
+    spread_home_odds REAL,
+    spread_away_odds REAL,
+    source TEXT NOT NULL DEFAULT 'bet365',
+    captured_at INTEGER NOT NULL
+);
+"""
+
+CREATE_SCAN_LOG_TABLE = """
+CREATE TABLE IF NOT EXISTS scan_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_number INTEGER NOT NULL,
+    started_at INTEGER NOT NULL,
+    finished_at INTEGER NOT NULL,
+    matches_found INTEGER NOT NULL DEFAULT 0,
+    matches_with_odds INTEGER NOT NULL DEFAULT 0,
+    picks_generated INTEGER NOT NULL DEFAULT 0,
+    picks_alerted INTEGER NOT NULL DEFAULT 0,
+    leagues_scanned TEXT NOT NULL DEFAULT ''
+);
+"""
+
 CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_matches_home ON matches(home);",
     "CREATE INDEX IF NOT EXISTS idx_matches_away ON matches(away);",
@@ -93,6 +129,11 @@ CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_picks_result ON picks(result);",
     "CREATE INDEX IF NOT EXISTS idx_picks_time ON picks(created_at DESC);",
     "CREATE INDEX IF NOT EXISTS idx_picks_league ON picks(league_id);",
+    "CREATE INDEX IF NOT EXISTS idx_odds_match ON odds_snapshots(match_id);",
+    "CREATE INDEX IF NOT EXISTS idx_odds_time ON odds_snapshots(captured_at DESC);",
+    "CREATE INDEX IF NOT EXISTS idx_odds_league ON odds_snapshots(league_id);",
+    "CREATE INDEX IF NOT EXISTS idx_odds_match_line ON odds_snapshots(match_id, line);",
+    "CREATE INDEX IF NOT EXISTS idx_scan_log_time ON scan_log(started_at DESC);",
 ]
 
 
@@ -116,6 +157,8 @@ class MatchDatabase:
         conn.execute(CREATE_TABLE)
         conn.execute(CREATE_PICKS_TABLE)
         conn.execute(CREATE_PLAYER_FORM_TABLE)
+        conn.execute(CREATE_ODDS_SNAPSHOTS_TABLE)
+        conn.execute(CREATE_SCAN_LOG_TABLE)
         for idx_sql in CREATE_INDEXES:
             conn.execute(idx_sql)
         conn.commit()
@@ -659,6 +702,142 @@ class MatchDatabase:
             created_at=row["created_at"],
             resolved_at=row["resolved_at"],
         )
+
+    # ── Odds snapshots ────────────────────────────────────────────────
+
+    def snapshot_odds(self, matches: list, now: int | None = None) -> int:
+        """Store a snapshot of current odds for a list of UpcomingMatch objects.
+
+        Captures every O/U line, moneyline, and spread available on each
+        match.  Called once per scan cycle so line movements accumulate
+        over time.
+
+        Returns the number of rows written.
+        """
+        if now is None:
+            now = int(time.time())
+        conn = self._get_conn()
+        written = 0
+
+        for m in matches:
+            odds = m.odds
+            if odds is None or not odds.has_data:
+                continue
+
+            # O/U total lines
+            for ol in odds.total_lines:
+                conn.execute(
+                    """INSERT INTO odds_snapshots
+                       (match_id, league_id, home, away, start_time,
+                        line, over_odds, under_odds, source, captured_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (m.match_id, m.league_id, m.home, m.away,
+                     m.start_time, ol.line, ol.over_odds, ol.under_odds,
+                     ol.source, now),
+                )
+                written += 1
+
+            # Moneyline
+            if odds.moneyline:
+                ml = odds.moneyline
+                conn.execute(
+                    """INSERT INTO odds_snapshots
+                       (match_id, league_id, home, away, start_time,
+                        home_ml, draw_ml, away_ml, source, captured_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (m.match_id, m.league_id, m.home, m.away,
+                     m.start_time, ml.home_odds, ml.draw_odds,
+                     ml.away_odds, ml.source, now),
+                )
+                written += 1
+
+            # Spreads
+            for sl in odds.spreads:
+                conn.execute(
+                    """INSERT INTO odds_snapshots
+                       (match_id, league_id, home, away, start_time,
+                        spread, spread_home_odds, spread_away_odds,
+                        source, captured_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (m.match_id, m.league_id, m.home, m.away,
+                     m.start_time, sl.handicap, sl.home_odds,
+                     sl.away_odds, sl.source, now),
+                )
+                written += 1
+
+        conn.commit()
+        return written
+
+    def get_odds_history(
+        self, match_id: str, line: float | None = None,
+    ) -> list[sqlite3.Row]:
+        """Get odds snapshot history for a match, optionally filtered by line."""
+        conn = self._get_conn()
+        if line is not None:
+            return conn.execute(
+                """SELECT * FROM odds_snapshots
+                   WHERE match_id = ? AND line = ?
+                   ORDER BY captured_at ASC""",
+                (match_id, line),
+            ).fetchall()
+        return conn.execute(
+            "SELECT * FROM odds_snapshots WHERE match_id = ? ORDER BY captured_at ASC",
+            (match_id,),
+        ).fetchall()
+
+    def get_recent_odds(self, limit: int = 100) -> list[sqlite3.Row]:
+        """Get the most recent odds snapshots across all matches."""
+        conn = self._get_conn()
+        return conn.execute(
+            "SELECT * FROM odds_snapshots ORDER BY captured_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+    def total_odds_snapshots(self) -> int:
+        conn = self._get_conn()
+        row = conn.execute("SELECT COUNT(*) as cnt FROM odds_snapshots").fetchone()
+        return row["cnt"]
+
+    # ── Scan log ──────────────────────────────────────────────────────
+
+    def log_scan(
+        self,
+        scan_number: int,
+        started_at: int,
+        finished_at: int,
+        matches_found: int = 0,
+        matches_with_odds: int = 0,
+        picks_generated: int = 0,
+        picks_alerted: int = 0,
+        leagues_scanned: str = "",
+    ) -> int:
+        """Record metadata about a completed scan cycle. Returns row ID."""
+        conn = self._get_conn()
+        cur = conn.execute(
+            """INSERT INTO scan_log
+               (scan_number, started_at, finished_at, matches_found,
+                matches_with_odds, picks_generated, picks_alerted,
+                leagues_scanned)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (scan_number, started_at, finished_at, matches_found,
+             matches_with_odds, picks_generated, picks_alerted,
+             leagues_scanned),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+    def get_scan_history(self, limit: int = 50) -> list[sqlite3.Row]:
+        """Get recent scan log entries."""
+        conn = self._get_conn()
+        return conn.execute(
+            "SELECT * FROM scan_log ORDER BY started_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+    def total_scans(self) -> int:
+        conn = self._get_conn()
+        row = conn.execute("SELECT COUNT(*) as cnt FROM scan_log").fetchone()
+        return row["cnt"]
 
     # ── Helpers ──────────────────────────────────────────────────────
 

@@ -349,6 +349,7 @@ class EsporfBot:
     async def scan_once(self) -> list[MatchupReport]:
         """Run a single scan cycle. Returns reports with qualifying trends."""
         self._scan_count += 1
+        scan_started = int(time.time())
         timestamp = datetime.now().strftime("%H:%M:%S")
         console.print(f"\n[dim]── Scan #{self._scan_count} at {timestamp} ──[/dim]")
 
@@ -640,6 +641,11 @@ class EsporfBot:
                 f"kambi attached {kambi_fallback}.[/yellow]"
             )
 
+        # Persist odds snapshot for historical tracking
+        snap_count = self.db.snapshot_odds(all_upcoming)
+        if snap_count:
+            logger.info("Stored %d odds snapshot rows", snap_count)
+
         # Get Forebet predictions (already cached from _fetch_external_data)
         forebet_preds = await self.forebet.get_predictions()
 
@@ -678,6 +684,7 @@ class EsporfBot:
         # cross-references an ace_/esb_ match with a different numeric ID.
         # When running under the Discord bot, webhook alerts are skipped —
         # the bot handles delivery via its own channel.send().
+        alerted_count = 0
         if not self._skip_webhook_alerts:
             new_reports = [
                 r for r in reports_with_picks
@@ -688,6 +695,19 @@ class EsporfBot:
                 for r in new_reports:
                     self._alerted_keys.add(_match_key(r.match))
                     self.record_pick(r)
+                alerted_count = len(new_reports)
+
+        # Log scan metadata
+        self.db.log_scan(
+            scan_number=self._scan_count,
+            started_at=scan_started,
+            finished_at=int(time.time()),
+            matches_found=len(all_upcoming),
+            matches_with_odds=odds_count,
+            picks_generated=len(reports_with_picks),
+            picks_alerted=alerted_count,
+            leagues_scanned=settings.league_ids,
+        )
 
         return reports_with_picks
 
