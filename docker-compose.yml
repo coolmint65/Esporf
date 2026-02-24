@@ -2,7 +2,7 @@ services:
   esporf-discord:
     build: .
     container_name: esporf-discord
-    restart: unless-stopped
+    restart: "no"
     env_file: .env
     command: ["discord"]
     stop_signal: SIGINT
