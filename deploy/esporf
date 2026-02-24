@@ -12,7 +12,7 @@ case "${1:-help}" in
   restart)  systemctl restart esporf ;;
   status)   systemctl status esporf ;;
   logs)     docker compose -f "$DIR/docker-compose.yml" logs -f ;;
-  update)   git -C "$DIR" pull && systemctl stop esporf ;;
+  update)   git -C "$DIR" pull && echo "Updated. Run 'esporf restart' to apply." ;;
   config)   nano "$DIR/.env" ;;
   help|*)
     echo "Usage: esporf <command>"
@@ -22,7 +22,7 @@ case "${1:-help}" in
     echo "  restart   Restart the bot"
     echo "  status    Check if the bot is running"
     echo "  logs      Tail live logs"
-    echo "  update    Pull latest code and stop the bot"
+    echo "  update    Pull latest code (does NOT restart)"
     echo "  config    Edit .env settings"
     ;;
 esac
