@@ -237,11 +237,9 @@ class EsporfBot:
             return self.db._row_to_match(row)
 
         # 2. H2H by full player names + start_time tolerance.
-        #    Must pass the original names (e.g. "Bayer 04 (Sheva)") so that
-        #    _handle_pattern can build the correct %(Handle) LIKE pattern.
-        #    The old code extracted handles first, which produced bare strings
-        #    like "Sheva" that _handle_pattern treated as exact matches — never
-        #    matching "Bayer 04 (Sheva)" in the DB.
+        #    _handle_patterns builds both bare and parenthesized LIKE patterns
+        #    so lookups work regardless of name format differences between
+        #    sources (e.g. Kambi bare "ALPHA" vs BetsAPI "Chelsea (ALPHA)").
         h2h = self.db.get_h2h_matches(pick.home, pick.away, limit=10)
         for match in h2h:
             if abs(match.start_time - pick.start_time) <= 300:
