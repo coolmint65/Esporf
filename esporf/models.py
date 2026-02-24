@@ -335,6 +335,66 @@ class MatchResult:
 
 
 @dataclass
+class PlayerForm:
+    """Aggregated player performance stats computed from match history.
+
+    Stored in the player_form table and rebuilt whenever new results
+    come in.  Used by the trend analyzer to gate picks — players whose
+    recent form drops below thresholds won't generate picks.
+    """
+
+    handle: str
+    league_id: int
+    matches_played: int = 0
+    wins: int = 0
+    losses: int = 0
+    draws: int = 0
+    goals_scored: int = 0
+    goals_conceded: int = 0
+    avg_goals_scored: float = 0.0
+    avg_goals_conceded: float = 0.0
+    win_rate: float = 0.0
+    over_2_5_rate: float = 0.0
+    over_3_5_rate: float = 0.0
+    over_4_5_rate: float = 0.0
+    over_5_5_rate: float = 0.0
+    # Recent form — last 10 matches
+    recent_matches: int = 0
+    recent_wins: int = 0
+    recent_losses: int = 0
+    recent_draws: int = 0
+    recent_goals_scored: int = 0
+    recent_goals_conceded: int = 0
+    recent_win_rate: float = 0.0
+    recent_over_2_5_rate: float = 0.0
+    last_updated: int = 0
+
+    @property
+    def avg_total_goals(self) -> float:
+        return self.avg_goals_scored + self.avg_goals_conceded
+
+    @property
+    def recent_avg_goals_scored(self) -> float:
+        return self.recent_goals_scored / self.recent_matches if self.recent_matches else 0.0
+
+    @property
+    def recent_avg_goals_conceded(self) -> float:
+        return self.recent_goals_conceded / self.recent_matches if self.recent_matches else 0.0
+
+    @property
+    def form_trend(self) -> str:
+        """Compare recent win rate to overall — rising, falling, or stable."""
+        if self.recent_matches < 5 or self.matches_played < 10:
+            return "insufficient"
+        diff = self.recent_win_rate - self.win_rate
+        if diff > 0.10:
+            return "rising"
+        elif diff < -0.10:
+            return "falling"
+        return "stable"
+
+
+@dataclass
 class UpcomingMatch:
     """An upcoming/live match that we want to find trends for."""
 

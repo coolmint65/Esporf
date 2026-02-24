@@ -364,6 +364,110 @@ def _register_commands(bot: EsporfDiscordBot) -> None:
     async def cmd_record(interaction: discord.Interaction) -> None:
         await _send_profit_embed(interaction, "alltime", "All-Time Record")
 
+    @bot.tree.command(name="form", description="Look up a player's form and stats")
+    @app_commands.describe(player="Player handle (e.g. Sheva, Glory)")
+    async def cmd_form(
+        interaction: discord.Interaction,
+        player: str,
+    ) -> None:
+        db = bot.scanner.db
+        form = db.get_player_form(player.strip())
+
+        if not form:
+            await interaction.response.send_message(
+                f"No form data for **{player}**. Check the handle spelling.",
+                ephemeral=True,
+            )
+            return
+
+        league_name = league_display_name(form.league_id)
+        trend = form.form_trend
+        trend_label = {
+            "rising": "Rising",
+            "falling": "Falling",
+            "stable": "Stable",
+            "insufficient": "New Player",
+        }.get(trend, trend)
+
+        lines = [
+            f"**League:** {league_name}",
+            f"**Matches:** {form.matches_played}",
+            "",
+            f"**Record:** {form.wins}W - {form.losses}L - {form.draws}D",
+            f"**Win Rate:** {form.win_rate:.0%}",
+            f"**Avg GF / GA:** {form.avg_goals_scored:.1f} / {form.avg_goals_conceded:.1f}",
+            "",
+            f"**O2.5:** {form.over_2_5_rate:.0%}\u2003"
+            f"**O3.5:** {form.over_3_5_rate:.0%}\u2003"
+            f"**O4.5:** {form.over_4_5_rate:.0%}\u2003"
+            f"**O5.5:** {form.over_5_5_rate:.0%}",
+            "",
+            f"**Last {form.recent_matches}:** {form.recent_wins}W - "
+            f"{form.recent_losses}L - {form.recent_draws}D "
+            f"({form.recent_win_rate:.0%} WR)",
+            f"**Recent Avg GF / GA:** {form.recent_avg_goals_scored:.1f} / "
+            f"{form.recent_avg_goals_conceded:.1f}",
+            f"**Form Trend:** {trend_label}",
+        ]
+
+        color = 0x2ECC71 if form.recent_win_rate >= 0.50 else (
+            0xFEE75C if form.recent_win_rate >= 0.30 else 0xED4245
+        )
+
+        embed = discord.Embed(
+            title=f"Player Form — {form.handle}",
+            description="\n".join(lines),
+            color=color,
+        )
+        await interaction.response.send_message(embed=embed)
+
+    @bot.tree.command(name="leaderboard", description="Top players by win rate")
+    @app_commands.describe(league="Filter by league (optional)")
+    @app_commands.choices(league=[
+        app_commands.Choice(name="All Leagues", value=0),
+        app_commands.Choice(name="GG League", value=42648),
+        app_commands.Choice(name="GT Leagues", value=42649),
+        app_commands.Choice(name="Volta", value=38439),
+    ])
+    async def cmd_leaderboard(
+        interaction: discord.Interaction,
+        league: app_commands.Choice[int] | None = None,
+    ) -> None:
+        db = bot.scanner.db
+        league_id = league.value if league and league.value != 0 else None
+        forms = db.get_all_player_forms(league_id=league_id, min_matches=10)
+
+        if not forms:
+            await interaction.response.send_message(
+                "No players with 10+ matches yet.", ephemeral=True,
+            )
+            return
+
+        # Top 15 by win rate
+        top = forms[:15]
+        lines = []
+        for i, f in enumerate(top, 1):
+            trend_icon = {"rising": "+", "falling": "-", "stable": "="}.get(
+                f.form_trend, "?"
+            )
+            lines.append(
+                f"`{i:>2}.` **{f.handle}** — "
+                f"{f.win_rate:.0%} WR ({f.matches_played} MP) "
+                f"[{trend_icon}]"
+            )
+
+        title = "Leaderboard"
+        if league and league.value != 0:
+            title += f" — {league.name}"
+
+        embed = discord.Embed(
+            title=title,
+            description="\n".join(lines),
+            color=0x3498DB,
+        )
+        embed.set_footer(text="Min 10 matches | [+] rising [-] falling [=] stable")
+        await interaction.response.send_message(embed=embed)
+
     @bot.tree.command(name="results", description="Show recent pick results")
     @app_commands.describe(count="Number of recent picks to show (default 10)")
     async def cmd_results(

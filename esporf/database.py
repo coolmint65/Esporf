@@ -11,8 +11,10 @@ import logging
 import os
 import sqlite3
 
+import time
+
 from esporf.config import settings
-from esporf.models import MatchResult, PickResult, TrackedPick, extract_handle
+from esporf.models import MatchResult, PickResult, PlayerForm, TrackedPick, extract_handle
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,36 @@ CREATE TABLE IF NOT EXISTS picks (
 );
 """
 
+CREATE_PLAYER_FORM_TABLE = """
+CREATE TABLE IF NOT EXISTS player_form (
+    handle TEXT NOT NULL,
+    league_id INTEGER NOT NULL,
+    matches_played INTEGER NOT NULL DEFAULT 0,
+    wins INTEGER NOT NULL DEFAULT 0,
+    losses INTEGER NOT NULL DEFAULT 0,
+    draws INTEGER NOT NULL DEFAULT 0,
+    goals_scored INTEGER NOT NULL DEFAULT 0,
+    goals_conceded INTEGER NOT NULL DEFAULT 0,
+    avg_goals_scored REAL NOT NULL DEFAULT 0.0,
+    avg_goals_conceded REAL NOT NULL DEFAULT 0.0,
+    win_rate REAL NOT NULL DEFAULT 0.0,
+    over_2_5_rate REAL NOT NULL DEFAULT 0.0,
+    over_3_5_rate REAL NOT NULL DEFAULT 0.0,
+    over_4_5_rate REAL NOT NULL DEFAULT 0.0,
+    over_5_5_rate REAL NOT NULL DEFAULT 0.0,
+    recent_matches INTEGER NOT NULL DEFAULT 0,
+    recent_wins INTEGER NOT NULL DEFAULT 0,
+    recent_losses INTEGER NOT NULL DEFAULT 0,
+    recent_draws INTEGER NOT NULL DEFAULT 0,
+    recent_goals_scored INTEGER NOT NULL DEFAULT 0,
+    recent_goals_conceded INTEGER NOT NULL DEFAULT 0,
+    recent_win_rate REAL NOT NULL DEFAULT 0.0,
+    recent_over_2_5_rate REAL NOT NULL DEFAULT 0.0,
+    last_updated INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (handle, league_id)
+);
+"""
+
 CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_matches_home ON matches(home);",
     "CREATE INDEX IF NOT EXISTS idx_matches_away ON matches(away);",
@@ -83,6 +115,7 @@ class MatchDatabase:
         conn = self._get_conn()
         conn.execute(CREATE_TABLE)
         conn.execute(CREATE_PICKS_TABLE)
+        conn.execute(CREATE_PLAYER_FORM_TABLE)
         for idx_sql in CREATE_INDEXES:
             conn.execute(idx_sql)
         conn.commit()
@@ -388,6 +421,222 @@ class MatchDatabase:
             "profit": total_profit,
             "units_wagered": units_wagered,
         }
+
+    # ── Player form tracking ─────────────────────────────────────────
+
+    def rebuild_player_form(self, league_ids: list[int] | None = None) -> int:
+        """Recompute player_form for every player from the matches table.
+
+        Args:
+            league_ids: Leagues to rebuild.  Defaults to all leagues in DB.
+
+        Returns the number of player rows written.
+        """
+        conn = self._get_conn()
+        now = int(time.time())
+
+        if league_ids is None:
+            rows = conn.execute(
+                "SELECT DISTINCT league_id FROM matches"
+            ).fetchall()
+            league_ids = [r["league_id"] for r in rows]
+
+        written = 0
+        for lid in league_ids:
+            players = self.get_all_players(league_id=lid)
+            for player_name in players:
+                handle = extract_handle(player_name)
+                pattern = self._handle_pattern(player_name)
+
+                # All matches for this player in this league
+                all_rows = conn.execute(
+                    """SELECT home, away, home_score, away_score
+                       FROM matches
+                       WHERE (home LIKE ? OR away LIKE ?) AND league_id = ?
+                       ORDER BY start_time DESC""",
+                    (pattern, pattern, lid),
+                ).fetchall()
+
+                if not all_rows:
+                    continue
+
+                form = self._compute_form_from_rows(handle, lid, all_rows, now)
+                self._upsert_player_form(conn, form)
+                written += 1
+
+        conn.commit()
+        logger.info("Rebuilt player_form: %d rows across %d league(s)", written, len(league_ids))
+        return written
+
+    @staticmethod
+    def _compute_form_from_rows(
+        handle: str, league_id: int, rows: list[sqlite3.Row], now: int,
+    ) -> PlayerForm:
+        """Compute a PlayerForm from raw match rows (newest first)."""
+        total = len(rows)
+        wins = losses = draws = gs = gc = 0
+        over_2_5 = over_3_5 = over_4_5 = over_5_5 = 0
+
+        # Recent = last 10
+        recent_n = min(10, total)
+        r_wins = r_losses = r_draws = r_gs = r_gc = r_o25 = 0
+
+        for i, r in enumerate(rows):
+            h_handle = extract_handle(r["home"]).lower()
+            is_home = handle.lower() in h_handle or h_handle in handle.lower()
+
+            if is_home:
+                gf = r["home_score"]
+                ga = r["away_score"]
+            else:
+                gf = r["away_score"]
+                ga = r["home_score"]
+
+            gs += gf
+            gc += ga
+            total_goals = gf + ga
+
+            if gf > ga:
+                wins += 1
+            elif gf < ga:
+                losses += 1
+            else:
+                draws += 1
+
+            if total_goals > 2.5:
+                over_2_5 += 1
+            if total_goals > 3.5:
+                over_3_5 += 1
+            if total_goals > 4.5:
+                over_4_5 += 1
+            if total_goals > 5.5:
+                over_5_5 += 1
+
+            # Recent form window
+            if i < recent_n:
+                r_gs += gf
+                r_gc += ga
+                if total_goals > 2.5:
+                    r_o25 += 1
+                if gf > ga:
+                    r_wins += 1
+                elif gf < ga:
+                    r_losses += 1
+                else:
+                    r_draws += 1
+
+        return PlayerForm(
+            handle=handle,
+            league_id=league_id,
+            matches_played=total,
+            wins=wins,
+            losses=losses,
+            draws=draws,
+            goals_scored=gs,
+            goals_conceded=gc,
+            avg_goals_scored=gs / total if total else 0.0,
+            avg_goals_conceded=gc / total if total else 0.0,
+            win_rate=wins / total if total else 0.0,
+            over_2_5_rate=over_2_5 / total if total else 0.0,
+            over_3_5_rate=over_3_5 / total if total else 0.0,
+            over_4_5_rate=over_4_5 / total if total else 0.0,
+            over_5_5_rate=over_5_5 / total if total else 0.0,
+            recent_matches=recent_n,
+            recent_wins=r_wins,
+            recent_losses=r_losses,
+            recent_draws=r_draws,
+            recent_goals_scored=r_gs,
+            recent_goals_conceded=r_gc,
+            recent_win_rate=r_wins / recent_n if recent_n else 0.0,
+            recent_over_2_5_rate=r_o25 / recent_n if recent_n else 0.0,
+            last_updated=now,
+        )
+
+    @staticmethod
+    def _upsert_player_form(conn: sqlite3.Connection, f: PlayerForm) -> None:
+        conn.execute(
+            """INSERT OR REPLACE INTO player_form
+               (handle, league_id, matches_played, wins, losses, draws,
+                goals_scored, goals_conceded, avg_goals_scored, avg_goals_conceded,
+                win_rate, over_2_5_rate, over_3_5_rate, over_4_5_rate, over_5_5_rate,
+                recent_matches, recent_wins, recent_losses, recent_draws,
+                recent_goals_scored, recent_goals_conceded, recent_win_rate,
+                recent_over_2_5_rate, last_updated)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                f.handle, f.league_id, f.matches_played, f.wins, f.losses, f.draws,
+                f.goals_scored, f.goals_conceded, f.avg_goals_scored, f.avg_goals_conceded,
+                f.win_rate, f.over_2_5_rate, f.over_3_5_rate, f.over_4_5_rate, f.over_5_5_rate,
+                f.recent_matches, f.recent_wins, f.recent_losses, f.recent_draws,
+                f.recent_goals_scored, f.recent_goals_conceded, f.recent_win_rate,
+                f.recent_over_2_5_rate, f.last_updated,
+            ),
+        )
+
+    def get_player_form(
+        self, handle: str, league_id: int | None = None,
+    ) -> PlayerForm | None:
+        """Look up a single player's form stats."""
+        conn = self._get_conn()
+        h = handle.lower()
+        if league_id:
+            row = conn.execute(
+                "SELECT * FROM player_form WHERE LOWER(handle) = ? AND league_id = ?",
+                (h, league_id),
+            ).fetchone()
+        else:
+            # Return the row with the most matches if multiple leagues
+            row = conn.execute(
+                "SELECT * FROM player_form WHERE LOWER(handle) = ? ORDER BY matches_played DESC LIMIT 1",
+                (h,),
+            ).fetchone()
+        return self._row_to_player_form(row) if row else None
+
+    def get_all_player_forms(
+        self, league_id: int | None = None, min_matches: int = 0,
+    ) -> list[PlayerForm]:
+        """Get all player form entries, optionally filtered."""
+        conn = self._get_conn()
+        clauses = ["matches_played >= ?"]
+        params: list[int] = [min_matches]
+        if league_id:
+            clauses.append("league_id = ?")
+            params.append(league_id)
+        where = " WHERE " + " AND ".join(clauses)
+        rows = conn.execute(
+            f"SELECT * FROM player_form{where} ORDER BY win_rate DESC",
+            params,
+        ).fetchall()
+        return [self._row_to_player_form(r) for r in rows]
+
+    @staticmethod
+    def _row_to_player_form(row: sqlite3.Row) -> PlayerForm:
+        return PlayerForm(
+            handle=row["handle"],
+            league_id=row["league_id"],
+            matches_played=row["matches_played"],
+            wins=row["wins"],
+            losses=row["losses"],
+            draws=row["draws"],
+            goals_scored=row["goals_scored"],
+            goals_conceded=row["goals_conceded"],
+            avg_goals_scored=row["avg_goals_scored"],
+            avg_goals_conceded=row["avg_goals_conceded"],
+            win_rate=row["win_rate"],
+            over_2_5_rate=row["over_2_5_rate"],
+            over_3_5_rate=row["over_3_5_rate"],
+            over_4_5_rate=row["over_4_5_rate"],
+            over_5_5_rate=row["over_5_5_rate"],
+            recent_matches=row["recent_matches"],
+            recent_wins=row["recent_wins"],
+            recent_losses=row["recent_losses"],
+            recent_draws=row["recent_draws"],
+            recent_goals_scored=row["recent_goals_scored"],
+            recent_goals_conceded=row["recent_goals_conceded"],
+            recent_win_rate=row["recent_win_rate"],
+            recent_over_2_5_rate=row["recent_over_2_5_rate"],
+            last_updated=row["last_updated"],
+        )
 
     @staticmethod
     def _row_to_pick(row: sqlite3.Row) -> TrackedPick:

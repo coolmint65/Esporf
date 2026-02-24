@@ -255,6 +255,10 @@ class EsporfBot:
                 except Exception as e:
                     console.print(f"    [red]Failed: {e}[/red]")
 
+            # Build player form stats from the fresh history
+            form_count = self.db.rebuild_player_form(settings.tracked_league_ids)
+            console.print(f"  [dim]Built form profiles for {form_count} players[/dim]")
+
             console.print(
                 f"[bold green]Backfill complete: {self.db.total_matches():,} matches in DB[/bold green]\n"
             )
@@ -287,6 +291,11 @@ class EsporfBot:
                         logger.info("Added %d new results for league %d", added, lid)
                 except Exception as e:
                     logger.warning("Failed to update league %d: %s", lid, e)
+
+        # Rebuild player form stats with any new data
+        form_count = self.db.rebuild_player_form(settings.tracked_league_ids)
+        if form_count:
+            console.print(f"  [dim]Updated form profiles for {form_count} players[/dim]")
 
         console.print(
             f"[bold green]Backfill complete: {self.db.total_matches():,} matches in DB[/bold green]\n"
@@ -335,6 +344,9 @@ class EsporfBot:
                     logger.info("Added %d new results for league %d", added, lid)
             except Exception as e:
                 logger.warning("Failed to fetch ended matches for league %d: %s", lid, e)
+
+        # Refresh player form stats with the new results
+        self.db.rebuild_player_form(settings.tracked_league_ids)
 
         # Resolve any pending picks now that we have fresh results
         self.resolve_pending_picks()

@@ -24,6 +24,7 @@ from esporf.models import (
     MatchupReport,
     Trend,
     UpcomingMatch,
+    extract_handle,
     _poisson_over_prob,
 )
 from esporf.sources.forebet import ForebetPrediction
@@ -35,12 +36,29 @@ logger = logging.getLogger(__name__)
 class TrendAnalyzer:
     """Analyzes match history to find qualifying trends for a matchup."""
 
+    # Recent win-rate below this threshold → player is "out of form"
+    # and the matchup is skipped entirely.  Requires at least 10 recent
+    # matches so brand-new players aren't unfairly gated.
+    MIN_RECENT_WIN_RATE = 0.25
+
     def __init__(self, db: MatchDatabase):
         self.db = db
         self.min_hit_rate = settings.min_hit_rate
         self.min_sample = settings.min_sample_size
         self.last_n = settings.last_n_matches
         self.goal_lines = settings.goal_line_values
+
+    def _player_out_of_form(self, player: str, league_id: int) -> bool:
+        """Check if a player's recent form is too poor to pick.
+
+        Returns True if the player has enough history and their last-10
+        win rate is below MIN_RECENT_WIN_RATE.
+        """
+        handle = extract_handle(player)
+        form = self.db.get_player_form(handle, league_id=league_id)
+        if form is None or form.recent_matches < 10:
+            return False  # not enough data to judge — let them through
+        return form.recent_win_rate < self.MIN_RECENT_WIN_RATE
 
     def analyze_matchup(
         self,
@@ -54,9 +72,26 @@ class TrendAnalyzer:
         1. When real odds are available → only analyze lines the book offers
         2. When no odds → use default Volta book lines
 
+        Players whose recent form (last 10 matches) has dropped sharply
+        are skipped entirely — no trends, no picks.
+
         External data (TotalCorner, Forebet) adds independent trend signals
         when available, boosting agreement and confidence scores.
         """
+        # ── Form gate: skip players in poor recent form ──
+        if self._player_out_of_form(match.home, match.league_id):
+            logger.info(
+                "Skipping %s vs %s — %s is out of form",
+                match.home, match.away, extract_handle(match.home),
+            )
+            return MatchupReport(match=match, trends=[], avg_goals=0.0)
+        if self._player_out_of_form(match.away, match.league_id):
+            logger.info(
+                "Skipping %s vs %s — %s is out of form",
+                match.home, match.away, extract_handle(match.away),
+            )
+            return MatchupReport(match=match, trends=[], avg_goals=0.0)
+
         avg_goals = self._compute_matchup_avg_goals(
             match.home, match.away, match.league_id, tc_stats=tc_stats
         )
