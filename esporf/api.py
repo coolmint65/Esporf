@@ -75,6 +75,14 @@ def _setup_frontend():
 @app.on_event("startup")
 def on_startup():
     _setup_frontend()
+    # Rebuild player form if empty (e.g. after backfill without running scans)
+    db = _get_db()
+    try:
+        forms = db.get_all_player_forms(min_matches=1)
+        if not forms and db.total_matches() > 0:
+            db.rebuild_player_form()
+    finally:
+        db.close()
 
 
 def _get_db() -> MatchDatabase:
@@ -130,6 +138,11 @@ class StatsResponse(BaseModel):
     units_wagered: float
     roi: float | None
     roi_pct: str
+    # Match-level stats (always available even without picks)
+    total_matches: int = 0
+    total_players: int = 0
+    avg_total_goals: float | None = None
+    avg_total_goals_display: str = "--"
 
 
 class LeagueStatsResponse(BaseModel):
