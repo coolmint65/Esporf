@@ -83,8 +83,30 @@ class EsporfBot:
         self._scan_count = 0
         self._alerted_keys: set[str] = set()
         self._skip_webhook_alerts = skip_webhook_alerts
+        self._load_alerted_keys()
 
     # ── Pick tracking ────────────────────────────────────────────
+
+    def _load_alerted_keys(self) -> None:
+        """Populate the alerted set from DB so restarts don't duplicate picks.
+
+        Loads picks created in the last 24 hours and builds _match_key-style
+        keys so the scan loop treats them as already alerted.
+        """
+        since = int(time.time()) - 86400  # last 24h
+        rows = self.db.get_recent_pick_matches(since)
+        for home, away, start_time in rows:
+            h = extract_handle(home).lower()
+            a = extract_handle(away).lower()
+            pair = tuple(sorted([h, a]))
+            rounded_time = round(start_time / 600) * 600
+            key = f"{pair[0]}_{pair[1]}_{rounded_time}"
+            self._alerted_keys.add(key)
+        if self._alerted_keys:
+            logger.info(
+                "Loaded %d alerted key(s) from DB to prevent duplicates",
+                len(self._alerted_keys),
+            )
 
     def record_pick(self, report: MatchupReport) -> TrackedPick | None:
         """Record an alerted pick in the database for W/L tracking."""
@@ -106,6 +128,9 @@ class EsporfBot:
             created_at=int(time.time()),
         )
         row_id = self.db.insert_pick(tracked)
+        if row_id is None:
+            logger.debug("Pick already exists: %s %s", report.match.display_name, pick.market)
+            return None
         tracked.id = row_id
         logger.info("Recorded pick #%d: %s %s", row_id, report.match.display_name, pick.market)
         return tracked

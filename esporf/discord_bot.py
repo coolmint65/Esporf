@@ -18,7 +18,7 @@ from discord.ext import tasks
 from esporf.alerts.webhooks import _build_discord_embed
 from esporf.bot import EsporfBot, _match_key
 from esporf.config import settings
-from esporf.models import MatchupReport, extract_handle, league_display_name
+from esporf.models import MatchupReport, extract_handle, extract_team, league_display_name
 
 logger = logging.getLogger(__name__)
 
@@ -436,6 +436,10 @@ def _register_commands(bot: EsporfDiscordBot) -> None:
         for p in picks:
             home_h = extract_handle(p.home)
             away_h = extract_handle(p.away)
+            home_t = extract_team(p.home)
+            away_t = extract_team(p.away)
+            home_str = f"{home_h} ({home_t})" if home_t else home_h
+            away_str = f"{away_h} ({away_t})" if away_t else away_h
             score = p.score_str or "pending"
             emoji = p.result_emoji
             league_name = league_display_name(p.league_id)
@@ -444,7 +448,7 @@ def _register_commands(bot: EsporfDiscordBot) -> None:
             profit_str = f" ({p.profit_display})" if p.is_resolved else ""
 
             lines.append(
-                f"{emoji} **{home_h}** vs **{away_h}** [{score}]\n"
+                f"{emoji} **{home_str}** vs **{away_str}** [{score}]\n"
                 f"\u2003{p.market} {p.units:.1f}u{odds_str}{profit_str}\n"
                 f"\u2003*{league_name}* — <t:{p.start_time}:d>"
             )

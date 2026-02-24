@@ -50,7 +50,8 @@ CREATE TABLE IF NOT EXISTS picks (
     home_score INTEGER,
     away_score INTEGER,
     created_at INTEGER NOT NULL,
-    resolved_at INTEGER
+    resolved_at INTEGER,
+    UNIQUE(match_id, market)
 );
 """
 
@@ -129,6 +130,7 @@ CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_picks_result ON picks(result);",
     "CREATE INDEX IF NOT EXISTS idx_picks_time ON picks(created_at DESC);",
     "CREATE INDEX IF NOT EXISTS idx_picks_league ON picks(league_id);",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_picks_match_market ON picks(match_id, market);",
     "CREATE INDEX IF NOT EXISTS idx_odds_match ON odds_snapshots(match_id);",
     "CREATE INDEX IF NOT EXISTS idx_odds_time ON odds_snapshots(captured_at DESC);",
     "CREATE INDEX IF NOT EXISTS idx_odds_league ON odds_snapshots(league_id);",
@@ -159,9 +161,35 @@ class MatchDatabase:
         conn.execute(CREATE_PLAYER_FORM_TABLE)
         conn.execute(CREATE_ODDS_SNAPSHOTS_TABLE)
         conn.execute(CREATE_SCAN_LOG_TABLE)
+        self._deduplicate_picks(conn)
         for idx_sql in CREATE_INDEXES:
             conn.execute(idx_sql)
         conn.commit()
+
+    @staticmethod
+    def _deduplicate_picks(conn: sqlite3.Connection) -> None:
+        """Remove duplicate picks (same match_id + market), keeping the oldest.
+
+        Required before the UNIQUE index can be created on existing databases
+        that accumulated duplicates from restarts.
+        """
+        dupes = conn.execute(
+            """SELECT match_id, market, MIN(id) as keep_id, COUNT(*) as cnt
+               FROM picks
+               GROUP BY match_id, market
+               HAVING cnt > 1"""
+        ).fetchall()
+        if not dupes:
+            return
+        total_removed = 0
+        for row in dupes:
+            cur = conn.execute(
+                "DELETE FROM picks WHERE match_id = ? AND market = ? AND id != ?",
+                (row["match_id"], row["market"], row["keep_id"]),
+            )
+            total_removed += cur.rowcount
+        conn.commit()
+        logger.info("Deduplicated picks: removed %d duplicate row(s)", total_removed)
 
     def close(self) -> None:
         if self._conn:
@@ -343,11 +371,11 @@ class MatchDatabase:
 
     # ── Pick tracking ────────────────────────────────────────────────
 
-    def insert_pick(self, pick: TrackedPick) -> int:
-        """Insert a tracked pick. Returns the new row ID."""
+    def insert_pick(self, pick: TrackedPick) -> int | None:
+        """Insert a tracked pick. Returns the new row ID, or None if duplicate."""
         conn = self._get_conn()
         cur = conn.execute(
-            """INSERT INTO picks
+            """INSERT OR IGNORE INTO picks
                (match_id, league_id, home, away, start_time, market, units,
                 odds, hit_rate, edge, result, profit, home_score, away_score,
                 created_at, resolved_at)
@@ -361,7 +389,22 @@ class MatchDatabase:
             ),
         )
         conn.commit()
-        return cur.lastrowid
+        if cur.lastrowid and cur.rowcount > 0:
+            return cur.lastrowid
+        return None
+
+    def get_recent_pick_matches(self, since: int) -> list[tuple[str, str]]:
+        """Get (home, away) pairs for picks created since a timestamp.
+
+        Used to populate the in-memory alerted set on startup so we don't
+        re-alert matches that were already picked before a restart.
+        """
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT home, away, start_time FROM picks WHERE created_at >= ?",
+            (since,),
+        ).fetchall()
+        return [(r["home"], r["away"], r["start_time"]) for r in rows]
 
     def get_pending_picks(self) -> list[TrackedPick]:
         """Get all picks awaiting resolution."""
