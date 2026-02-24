@@ -155,12 +155,22 @@ class EsporfBot:
 
     def _find_match_result(self, pick: TrackedPick) -> MatchResult | None:
         """Find the completed match result for a tracked pick."""
-        home_handle = extract_handle(pick.home)
-        away_handle = extract_handle(pick.away)
-        h2h = self.db.get_h2h_matches(home_handle, away_handle, limit=5)
+        # 1. Direct match_id lookup (fastest, most reliable)
+        conn = self.db._get_conn()
+        row = conn.execute(
+            "SELECT * FROM matches WHERE match_id = ?", (pick.match_id,)
+        ).fetchone()
+        if row:
+            return self.db._row_to_match(row)
 
+        # 2. H2H by full player names + start_time tolerance.
+        #    Must pass the original names (e.g. "Bayer 04 (Sheva)") so that
+        #    _handle_pattern can build the correct %(Handle) LIKE pattern.
+        #    The old code extracted handles first, which produced bare strings
+        #    like "Sheva" that _handle_pattern treated as exact matches — never
+        #    matching "Bayer 04 (Sheva)" in the DB.
+        h2h = self.db.get_h2h_matches(pick.home, pick.away, limit=10)
         for match in h2h:
-            # Match by start_time (within 5 min tolerance for cross-source variance)
             if abs(match.start_time - pick.start_time) <= 300:
                 return match
         return None
