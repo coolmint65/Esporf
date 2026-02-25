@@ -43,7 +43,7 @@ app.add_middleware(
 
 
 _API_PREFIXES = (
-    "stats", "picks", "player", "players", "h2h",
+    "api", "stats", "picks", "player", "players", "h2h",
     "matches", "leagues", "scan", "docs", "redoc", "openapi.json",
 )
 
@@ -315,9 +315,23 @@ def _match_to_response(m) -> MatchResponse:
 # ── Routes ──────────────────────────────────────────────────────
 
 
-@app.get("/", response_model=HealthResponse)
+@app.get("/", include_in_schema=False)
+def root():
+    """Serve the frontend if available, otherwise redirect to API health."""
+    index = _FRONTEND_DIR / "index.html"
+    if index.exists():
+        return FileResponse(str(index))
+    # Fallback: if no frontend built, show the health check
+    return _health_check()
+
+
+@app.get("/api/health", response_model=HealthResponse)
 def health():
     """API health check and basic info."""
+    return _health_check()
+
+
+def _health_check() -> HealthResponse:
     db = _get_db()
     try:
         total_matches = db.total_matches()
