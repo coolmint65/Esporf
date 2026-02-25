@@ -43,8 +43,7 @@ app.add_middleware(
 
 
 _API_PREFIXES = (
-    "api", "stats", "picks", "player", "players", "h2h",
-    "matches", "leagues", "scan", "docs", "redoc", "openapi.json",
+    "api", "docs", "redoc", "openapi.json",
 )
 
 
@@ -325,6 +324,7 @@ def root():
     return _health_check()
 
 
+@app.get("/api/", response_model=HealthResponse, include_in_schema=False)
 @app.get("/api/health", response_model=HealthResponse)
 def health():
     """API health check and basic info."""
@@ -347,7 +347,7 @@ def _health_check() -> HealthResponse:
         db.close()
 
 
-@app.get("/stats", response_model=StatsResponse)
+@app.get("/api/stats", response_model=StatsResponse)
 def get_stats(
     league_id: int | None = Query(None, description="Filter by league ID"),
     days: int | None = Query(None, description="Only include picks from the last N days"),
@@ -387,7 +387,7 @@ def get_stats(
         db.close()
 
 
-@app.get("/stats/breakdown", response_model=BreakdownResponse)
+@app.get("/api/stats/breakdown", response_model=BreakdownResponse)
 def get_stats_breakdown():
     """Full breakdown by league, by market, and by confidence tier."""
     db = _get_db()
@@ -537,7 +537,7 @@ def _classify_confidence(units: float) -> str:
     return "Low (1u)"
 
 
-@app.get("/picks/live", response_model=list[PickResponse])
+@app.get("/api/picks/live", response_model=list[PickResponse])
 def get_live_picks():
     """Currently pending (unresolved) picks."""
     db = _get_db()
@@ -548,7 +548,7 @@ def get_live_picks():
         db.close()
 
 
-@app.get("/picks/history", response_model=list[PickResponse])
+@app.get("/api/picks/history", response_model=list[PickResponse])
 def get_pick_history(
     limit: int = Query(50, ge=1, le=500, description="Max picks to return"),
     league_id: int | None = Query(None, description="Filter by league ID"),
@@ -579,7 +579,7 @@ def get_pick_history(
         db.close()
 
 
-@app.get("/player/{name}", response_model=PlayerResponse)
+@app.get("/api/player/{name}", response_model=PlayerResponse)
 def get_player(
     name: str,
     league_id: int | None = Query(None, description="Filter to a specific league"),
@@ -640,7 +640,7 @@ def get_player(
         db.close()
 
 
-@app.get("/players", response_model=list[PlayerResponse])
+@app.get("/api/players", response_model=list[PlayerResponse])
 def list_players(
     league_id: int | None = Query(None, description="Filter to a specific league"),
     min_matches: int = Query(10, ge=1, description="Minimum matches played"),
@@ -698,7 +698,7 @@ def list_players(
         db.close()
 
 
-@app.get("/h2h/{player_a}/{player_b}", response_model=H2HResponse)
+@app.get("/api/h2h/{player_a}/{player_b}", response_model=H2HResponse)
 def get_h2h(
     player_a: str,
     player_b: str,
@@ -754,7 +754,7 @@ def get_h2h(
         db.close()
 
 
-@app.get("/matches/recent", response_model=list[MatchResponse])
+@app.get("/api/matches/recent", response_model=list[MatchResponse])
 def get_recent_matches(
     limit: int = Query(50, ge=1, le=500, description="Max matches to return"),
     league_id: int | None = Query(None, description="Filter by league ID"),
@@ -785,7 +785,7 @@ def get_recent_matches(
         db.close()
 
 
-@app.get("/leagues", response_model=list[LeagueStatsResponse])
+@app.get("/api/leagues", response_model=list[LeagueStatsResponse])
 def get_leagues():
     """All tracked leagues with match counts and pick stats."""
     db = _get_db()
@@ -836,7 +836,7 @@ def get_leagues():
         db.close()
 
 
-@app.get("/scan/status", response_model=ScanStatusResponse)
+@app.get("/api/scan/status", response_model=ScanStatusResponse)
 def get_scan_status():
     """Last scan info, total scans, and database health."""
     db = _get_db()

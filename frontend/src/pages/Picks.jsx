@@ -19,6 +19,7 @@ export default function Picks() {
   const { data: picks, isLoading, error } = useQuery({
     queryKey: ['pickHistory', params],
     queryFn: () => api.pickHistory(params),
+    refetchInterval: 60_000,
   })
 
   const { data: live } = useQuery({

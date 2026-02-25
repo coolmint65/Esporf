@@ -10,11 +10,13 @@ export default function Leagues() {
   const { data: leagues, isLoading, error } = useQuery({
     queryKey: ['leagues'],
     queryFn: api.leagues,
+    refetchInterval: 60_000,
   })
 
   const { data: scan } = useQuery({
     queryKey: ['scan'],
     queryFn: api.scanStatus,
+    refetchInterval: 60_000,
   })
 
   if (isLoading) return <Loading />

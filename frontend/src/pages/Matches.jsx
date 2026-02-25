@@ -19,6 +19,7 @@ export default function Matches() {
   const { data: matches, isLoading, error } = useQuery({
     queryKey: ['matches', matchParams],
     queryFn: () => api.recentMatches(matchParams),
+    refetchInterval: 60_000,
   })
 
   const { data: h2hData, isLoading: h2hLoading, error: h2hError } = useQuery({

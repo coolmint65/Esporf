@@ -25,6 +25,7 @@ export default function Players() {
   const { data: players, isLoading, error } = useQuery({
     queryKey: ['players', params],
     queryFn: () => api.players(params),
+    refetchInterval: 60_000,
   })
 
   const sorted = players ? [...players].sort((a, b) => b.win_rate - a.win_rate) : []
