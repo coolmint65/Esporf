@@ -176,45 +176,70 @@ class EsporfBot:
         logger.info("Recorded pick #%d: %s %s", row_id, report.match.display_name, pick.market)
         return tracked
 
-    def resolve_pending_picks(self) -> list[TrackedPick]:
-        """Check pending picks against completed match results and resolve them."""
+    async def resolve_pending_picks(self) -> list[TrackedPick]:
+        """Check pending picks against completed match results and resolve them.
+
+        Two-pass approach:
+        1. Fast pass — look up each pick in the local DB (direct match_id
+           then H2H name+time).
+        2. Stale-pick pass — for picks whose match should have ended by now
+           (start_time + 20 min < now), fetch fresh ended matches from
+           BetsAPI for the relevant league(s) and re-attempt the lookup.
+           This catches picks stored with ace_/esb_ IDs that never got
+           cross-referenced to a BetsAPI numeric ID.
+        """
         pending = self.db.get_pending_picks()
         if not pending:
             return []
 
         resolved: list[TrackedPick] = []
         now = int(time.time())
+        still_pending: list[TrackedPick] = []
 
+        # ── Pass 1: local DB lookup ──────────────────────────────────
         for pick in pending:
-            # Look up the match result by trying to find it in the DB
             result_match = self._find_match_result(pick)
-            if result_match is None:
-                continue
+            if result_match is not None:
+                self._resolve_one(pick, result_match, now, resolved)
+            else:
+                still_pending.append(pick)
 
-            outcome, profit = self._evaluate_pick(pick, result_match)
-            self.db.resolve_pick(
-                pick_id=pick.id,
-                result=outcome,
-                profit=profit,
-                home_score=result_match.home_score,
-                away_score=result_match.away_score,
-                resolved_at=now,
-            )
+        # ── Pass 2: fetch fresh ended matches for stale picks ────────
+        # eSoccer matches last 8-12 min; 20 min buffer is generous.
+        _STALE_THRESHOLD = 20 * 60  # seconds
+        stale = [p for p in still_pending if (now - p.start_time) > _STALE_THRESHOLD]
 
-            pick.result = outcome
-            pick.profit = profit
-            pick.home_score = result_match.home_score
-            pick.away_score = result_match.away_score
-            pick.resolved_at = now
-            resolved.append(pick)
+        if stale:
+            # Determine which leagues need a fresh ended-match fetch
+            stale_leagues = {p.league_id for p in stale}
+            for lid in stale_leagues:
+                try:
+                    ended = await self.api.get_ended_matches(lid, page=1)
+                    added = self.db.insert_many(ended)
+                    if added:
+                        logger.info(
+                            "Stale-pick resolver: added %d ended results for league %d",
+                            added, lid,
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "Stale-pick resolver: failed to fetch ended for league %d: %s",
+                        lid, e,
+                    )
 
-            emoji = pick.result_emoji
-            logger.info(
-                "%s Pick #%d resolved: %s %s → %s (%s)",
-                emoji, pick.id, extract_handle(pick.home),
-                f"vs {extract_handle(pick.away)}", outcome.value,
-                pick.profit_display,
-            )
+            # Re-attempt resolution with the freshly-inserted results
+            for pick in stale:
+                result_match = self._find_match_result(pick)
+                if result_match is not None:
+                    self._resolve_one(pick, result_match, now, resolved)
+                else:
+                    age_min = (now - pick.start_time) // 60
+                    logger.warning(
+                        "Pick #%d still unresolved (%d min old): %s vs %s [%s]",
+                        pick.id, age_min,
+                        extract_handle(pick.home), extract_handle(pick.away),
+                        pick.match_id,
+                    )
 
         if resolved:
             console.print(
@@ -225,6 +250,36 @@ class EsporfBot:
             )
 
         return resolved
+
+    def _resolve_one(
+        self, pick: TrackedPick, result: MatchResult,
+        now: int, resolved: list[TrackedPick],
+    ) -> None:
+        """Evaluate a single pick against its match result and persist."""
+        outcome, profit = self._evaluate_pick(pick, result)
+        self.db.resolve_pick(
+            pick_id=pick.id,
+            result=outcome,
+            profit=profit,
+            home_score=result.home_score,
+            away_score=result.away_score,
+            resolved_at=now,
+        )
+
+        pick.result = outcome
+        pick.profit = profit
+        pick.home_score = result.home_score
+        pick.away_score = result.away_score
+        pick.resolved_at = now
+        resolved.append(pick)
+
+        emoji = pick.result_emoji
+        logger.info(
+            "%s Pick #%d resolved: %s %s → %s (%s)",
+            emoji, pick.id, extract_handle(pick.home),
+            f"vs {extract_handle(pick.away)}", outcome.value,
+            pick.profit_display,
+        )
 
     def _find_match_result(self, pick: TrackedPick) -> MatchResult | None:
         """Find the completed match result for a tracked pick."""
@@ -431,7 +486,7 @@ class EsporfBot:
         self.db.rebuild_player_form(settings.tracked_league_ids)
 
         # Resolve any pending picks now that we have fresh results
-        self.resolve_pending_picks()
+        await self.resolve_pending_picks()
 
         # Fetch external data (TotalCorner + Forebet) in parallel
         await self._fetch_external_data()
