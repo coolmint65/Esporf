@@ -682,6 +682,69 @@ class EsporfBot:
         except Exception as e:
             logger.warning("kambi odds fetch failed: %s", e)
 
+        # Volta odds retry — BetsAPI lists Volta matches very late (~2 min
+        # before kickoff).  If any Volta matches are still missing odds,
+        # wait 60s and re-attempt the cross-ref + odds fetch once.
+        _VOLTA_LID = 38439
+        volta_no_odds = [
+            m for m in all_upcoming
+            if m.league_id == _VOLTA_LID
+            and not (m.odds and m.odds.has_data)
+        ]
+        if volta_no_odds and self._running:
+            console.print(
+                f"  [dim]{len(volta_no_odds)} Volta match(es) missing odds "
+                f"— retrying in 60s...[/dim]"
+            )
+            await asyncio.sleep(60)
+
+            # Re-attempt cross-reference for unresolved IDs
+            unresolved = [m for m in volta_no_odds if m.match_id.startswith(("esb_", "ace_"))]
+            if unresolved:
+                try:
+                    fresh = []
+                    fresh.extend(await self.api.get_inplay_matches(_VOLTA_LID))
+                    fresh.extend(await self.api.get_upcoming_matches(_VOLTA_LID))
+
+                    fresh_lookup: dict[tuple[str, str], list[UpcomingMatch]] = {}
+                    for fm in fresh:
+                        h = extract_handle(fm.home).lower()
+                        a = extract_handle(fm.away).lower()
+                        pair = tuple(sorted([h, a]))
+                        fresh_lookup.setdefault(pair, []).append(fm)
+
+                    resolved = 0
+                    for m in unresolved:
+                        h = extract_handle(m.home).lower()
+                        a = extract_handle(m.away).lower()
+                        pair = tuple(sorted([h, a]))
+                        for candidate in fresh_lookup.get(pair, []):
+                            if abs(candidate.start_time - m.start_time) <= 300:
+                                m.match_id = candidate.match_id
+                                resolved += 1
+                                break
+                    if resolved:
+                        console.print(
+                            f"  [dim]Volta retry: resolved {resolved} ID(s)[/dim]"
+                        )
+                except Exception as e:
+                    logger.warning("Volta retry cross-ref failed: %s", e)
+
+            # Fetch odds for newly resolved + any with numeric IDs but no odds
+            retry_targets = [
+                m for m in volta_no_odds
+                if not m.match_id.startswith(("esb_", "ace_", "kambi_"))
+                and not (m.odds and m.odds.has_data)
+            ]
+            if retry_targets:
+                await self.api.fetch_odds_batch(retry_targets)
+
+            retry_got = sum(1 for m in volta_no_odds if m.odds and m.odds.has_data)
+            if retry_got:
+                console.print(
+                    f"  [dim]Volta retry: got odds for {retry_got}/{len(volta_no_odds)} match(es)[/dim]"
+                )
+
         odds_count = sum(1 for m in all_upcoming if m.odds and m.odds.has_data)
         if odds_count:
             sources = []
