@@ -756,7 +756,9 @@ class EsporfBot:
                     and not (m.odds and m.odds.has_data)
                 ]
                 if retry_targets:
-                    await self.api.fetch_odds_batch(retry_targets)
+                    await self.api.fetch_odds_batch(
+                        retry_targets, skip_bet365_prematch=True,
+                    )
 
                 got = sum(1 for m in volta_no_odds if m.odds and m.odds.has_data)
                 remaining = len(volta_no_odds) - got

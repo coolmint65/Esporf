@@ -546,14 +546,17 @@ class BetsAPIClient:
         return odds
 
     async def fetch_odds_batch(
-        self, matches: list[UpcomingMatch], delay: float = 0.3
+        self, matches: list[UpcomingMatch], delay: float = 0.3,
+        *, skip_bet365_prematch: bool = False,
     ) -> None:
         """Fetch odds for a batch of matches, attaching results to each.
 
-        Cascades through three endpoints for maximum coverage:
+        Cascades through up to three endpoints for maximum coverage:
         1. /v2/event/odds — standard odds history
         2. /v2/event/odds/summary — latest snapshot (may arrive earlier)
-        3. /v3/bet365/prematch — direct bet365 prematch feed
+        3. /v3/bet365/prematch — direct bet365 prematch feed (skipped when
+           *skip_bet365_prematch* is True, e.g. for Volta in-play events
+           where the endpoint consistently returns 403)
 
         Adds a small delay between API calls to respect rate limits.
         Modifies matches in-place by setting their ``odds`` attribute.
@@ -583,6 +586,12 @@ class BetsAPIClient:
                         "Odds for %s via v2/odds/summary: lines=%s",
                         match.display_name, match.odds.available_lines,
                     )
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    continue
+
+                if skip_bet365_prematch:
+                    logger.debug("No odds from v2 endpoints for %s", match.display_name)
                     if delay > 0:
                         await asyncio.sleep(delay)
                     continue
