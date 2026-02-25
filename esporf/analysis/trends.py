@@ -43,6 +43,24 @@ class TrendAnalyzer:
         self.last_n = settings.last_n_matches
         self.goal_lines = settings.goal_line_values
 
+    def effective_min_rate(self, sample_size: int) -> float:
+        """Dynamic hit-rate threshold that scales with sample size.
+
+        Small samples need a higher bar (less confidence), while larger
+        samples can accept a slightly lower rate (more statistically
+        reliable).  The adjustment is capped at +4% / -3% from the base.
+        """
+        base = self.min_hit_rate
+        if sample_size < 15:
+            # Small sample — require more to compensate for noise
+            return base + 0.04
+        if sample_size >= 30:
+            # Large sample — statistically strong, can accept a bit less
+            return base - 0.03
+        # 15-29: linearly interpolate between base and base - 0.03
+        ratio = (sample_size - 15) / 15
+        return base - (0.03 * ratio)
+
     def _get_player_tier(self, player: str, league_id: int) -> tuple[PlayerTier, float]:
         """Evaluate a player's current tier and form modifier.
 
@@ -419,10 +437,11 @@ class TrendAnalyzer:
             return []
 
         trends: list[Trend] = []
+        threshold = self.effective_min_rate(ps.matches_played)
 
         for line in goal_lines:
             rate = ps.over_rates.get(line)
-            if rate is not None and rate >= self.min_hit_rate:
+            if rate is not None and rate >= threshold:
                 hits = round(rate * ps.matches_played)
                 trends.append(Trend(
                     category=f"Over {line} Goals",
@@ -442,7 +461,7 @@ class TrendAnalyzer:
             # Under = 1 - Over for .5 lines
             if rate is not None:
                 under_rate = 1.0 - rate
-                if under_rate >= self.min_hit_rate:
+                if under_rate >= threshold:
                     under_hits = round(under_rate * ps.matches_played)
                     trends.append(Trend(
                         category=f"Under {line} Goals",
@@ -460,7 +479,7 @@ class TrendAnalyzer:
                     ))
 
         # Win rate from TC
-        if ps.win_rate >= self.min_hit_rate:
+        if ps.win_rate >= threshold:
             trends.append(Trend(
                 category=f"{player} Win",
                 description=(
@@ -494,6 +513,8 @@ class TrendAnalyzer:
         """
         trends: list[Trend] = []
         predicted_total = pred.avg_goals
+        # Forebet uses synthetic rates (no real sample), so use the base threshold
+        fb_threshold = self.min_hit_rate
 
         for line in goal_lines:
             if predicted_total > line:
@@ -501,7 +522,7 @@ class TrendAnalyzer:
                 # Use a synthetic hit rate based on how far above the line
                 margin = predicted_total - line
                 synthetic_rate = min(0.50 + margin * 0.10, 0.95)
-                if synthetic_rate >= self.min_hit_rate:
+                if synthetic_rate >= fb_threshold:
                     trends.append(Trend(
                         category=f"Over {line} Goals",
                         description=(
@@ -522,7 +543,7 @@ class TrendAnalyzer:
             elif predicted_total < line:
                 margin = line - predicted_total
                 synthetic_rate = min(0.50 + margin * 0.10, 0.95)
-                if synthetic_rate >= self.min_hit_rate:
+                if synthetic_rate >= fb_threshold:
                     trends.append(Trend(
                         category=f"Under {line} Goals",
                         description=(
@@ -622,12 +643,12 @@ class TrendAnalyzer:
         desc_template: str,
         player_b: str | None = None,
     ) -> Trend | None:
-        """Create a Trend only if it meets the minimum hit rate threshold."""
+        """Create a Trend only if it meets the dynamic hit rate threshold."""
         if total < self.min_sample:
             return None
 
         hit_rate = hits / total
-        if hit_rate < self.min_hit_rate:
+        if hit_rate < self.effective_min_rate(total):
             return None
 
         description = f"{desc_template} in {hits}/{total} matches ({hit_rate:.0%})"
