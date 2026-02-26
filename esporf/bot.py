@@ -159,6 +159,15 @@ class EsporfBot:
         if not pick:
             return None
 
+        # Resolve decimal odds — fall back to ML side lookup if property
+        # returns None (can happen when _ml_side isn't set on the BetPick).
+        dec_odds = pick.decimal_odds
+        if dec_odds is None and pick.moneyline and report.match.odds:
+            from esporf.models import _get_moneyline_dec_odds
+            dec_odds = _get_moneyline_dec_odds(
+                pick.market, pick.moneyline, report.match,
+            )
+
         tracked = TrackedPick(
             match_id=report.match.match_id,
             league_id=report.match.league_id,
@@ -167,7 +176,7 @@ class EsporfBot:
             start_time=report.match.start_time,
             market=pick.market,
             units=pick.units,
-            odds=pick.decimal_odds,
+            odds=dec_odds,
             hit_rate=max(t.hit_rate for t in pick.supporting_trends),
             edge=pick.edge,
             created_at=int(time.time()),

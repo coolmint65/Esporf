@@ -7,6 +7,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import cached_property
 
 
 _HANDLE_RE = re.compile(r"\(([^)]+)\)\s*$")
@@ -707,16 +708,19 @@ class MatchupReport:
     def has_trends(self) -> bool:
         return len(self.trends) > 0
 
-    @property
+    @cached_property
     def best_bet(self) -> BetPick | None:
         """Pick the single best bet from qualifying trends.
+
+        Cached so repeated access (filtering, recording, alerting) returns
+        the same BetPick instance without re-running the scoring algorithm.
 
         When real odds are available (from BetsAPI), we:
         1. Only consider lines actually offered by the sportsbook
         2. Use real implied probability instead of estimates
         3. Score by edge (hit_rate - implied_probability) for maximum value
 
-        When no odds are available, falls back to the tightest-line heuristic.
+        When no odds are available, returns None (sportsbook odds required).
         """
         if not self.trends:
             return None
@@ -917,6 +921,10 @@ class MatchupReport:
                 odds_str = f" @ {best_spread.home_american}"
             else:
                 odds_str = f" @ {best_spread.away_american}"
+        elif best_ml and best_ml_side:
+            ml_dec = _ml_side_odds(best_ml, best_ml_side)
+            if ml_dec:
+                odds_str = f" @ {_decimal_to_american(ml_dec)}"
 
         reason = (
             f"{best_market}{odds_str} backed by {len(best_trends)} trend(s) "
