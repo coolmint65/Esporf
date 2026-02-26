@@ -20,7 +20,6 @@ Groups:
     2000124075 = All eSoccer (parent)
     2000124080 = Esports Battle (2x4min) — maps to GG League 8min (37298)
     2010205703 = eSports Battle (2x6min) — maps to GT Leagues 12min (23114)
-    2010205705 = Cyber Live Arena (2x5min)
 """
 
 from __future__ import annotations
@@ -103,7 +102,7 @@ class KambiClient:
             # Map Kambi group → BetsAPI league ID
             league_id = _GROUP_TO_LEAGUE.get(event.group_id)
             if league_id is None:
-                continue  # unmapped group (e.g. Cyber Live Arena)
+                continue  # unmapped group
             if league_ids is not None and league_id not in league_ids:
                 continue
 

@@ -1,4 +1,4 @@
-"""Discord bot frontend for Esporf — replaces webhook alerts with a proper bot.
+"""Discord bot frontend for Esporf — the primary alert delivery mechanism.
 
 Runs the same scan loop as `esporf run` but inside a discord.py background task,
 sending picks as rich embeds to a configured channel.  Adds slash commands for
@@ -15,7 +15,6 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 
-from esporf.alerts.webhooks import _build_discord_embed
 from esporf.bot import EsporfBot, _match_key
 from esporf.config import settings
 from esporf.models import MatchupReport, extract_handle, extract_team, league_display_name
@@ -23,6 +22,77 @@ from esporf.models import MatchupReport, extract_handle, extract_team, league_di
 logger = logging.getLogger(__name__)
 
 _EST = ZoneInfo("US/Eastern")
+
+# Hit-rate-to-color mapping (Discord embed hex colors)
+_COLOR_TIERS = [
+    (0.80, 0x2ECC71),  # green — 80%+
+    (0.70, 0xFEE75C),  # yellow — 70-79%
+    (0.65, 0xE67E22),  # orange — 65-70%
+    (0.00, 0xED4245),  # red — below 65% (safety)
+]
+
+
+def _confidence_color(confidence: float) -> int:
+    for threshold, color in _COLOR_TIERS:
+        if confidence >= threshold:
+            return color
+    return 0x95A5A6
+
+
+def _build_discord_embed(report: MatchupReport) -> dict:
+    """Build a clean Discord embed card for an odds-backed bet pick."""
+    match = report.match
+
+    pick = report.best_bet
+    if not pick:
+        return {}
+
+    # Hard guard — never build an embed for a non-tracked league
+    if match.league_id not in set(settings.tracked_league_ids):
+        logger.warning(
+            "Blocked embed for non-tracked league %d (%s)",
+            match.league_id, match.display_name,
+        )
+        return {}
+
+    league_name = league_display_name(match.league_id)
+    ts = match.start_time
+
+    top_rate = max(t.hit_rate for t in pick.supporting_trends)
+    total_hits = sum(t.hits for t in pick.supporting_trends)
+    total_sample = sum(t.sample_size for t in pick.supporting_trends)
+
+    home_handle = extract_handle(match.home)
+    away_handle = extract_handle(match.away)
+    home_team = extract_team(match.home)
+    away_team = extract_team(match.away)
+
+    home_display = f"{home_handle} ({home_team})" if home_team else home_handle
+    away_display = f"{away_handle} ({away_team})" if away_team else away_handle
+
+    # Show form quality indicator when it deviates from baseline
+    form_str = ""
+    if report.form_modifier >= 1.10:
+        form_str = f"  |  Form: {report.form_modifier:.2f}x"
+    elif report.form_modifier <= 0.90:
+        form_str = f"  |  Form: {report.form_modifier:.2f}x"
+
+    lines = [
+        f"### {home_display}  vs  {away_display}",
+        f"### Kickoff: <t:{ts}:t>  (<t:{ts}:R>)",
+        "",
+        f"## {pick.market.upper()}  —  {pick.units_display}",
+        "",
+        f"**{top_rate:.0%}** hit rate  ({total_hits}/{total_sample}){form_str}",
+    ]
+
+    color = _confidence_color(top_rate)
+
+    return {
+        "title": league_name,
+        "description": "\n".join(lines),
+        "color": color,
+    }
 
 
 # ── Bot class ────────────────────────────────────────────────────
@@ -39,7 +109,7 @@ class EsporfDiscordBot(discord.Client):
         )
         super().__init__(intents=intents, activity=activity, status=discord.Status.online)
         self.tree = app_commands.CommandTree(self)
-        self.scanner = EsporfBot(skip_webhook_alerts=True)
+        self.scanner = EsporfBot()
         self._alert_channel: discord.TextChannel | None = None
         self._scan_count = 0
         self._latest_reports: list[MatchupReport] = []
@@ -173,6 +243,8 @@ class EsporfDiscordBot(discord.Client):
         await self.scanner.esb.close()
         await self.scanner.ace.close()
         await self.scanner.kambi.close()
+        await self.scanner.bwin.close()
+        await self.scanner.fanduel.close()
         await self.scanner.tc.close()
         await self.scanner.forebet.close()
         self.scanner.db.close()

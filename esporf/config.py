@@ -35,11 +35,8 @@ class Settings(BaseSettings):
     # Used as fallback when real odds aren't available
     volta_book_lines: str = "2.5,3.5,4.5"
 
-    # Alerts
-    discord_webhook_url: str = ""
+    # Discord bot alerts
     discord_role_id: str = ""  # Role ID to mention in alerts (e.g. "eSoccer" role)
-
-    # Discord bot (alternative to webhook alerts)
     discord_bot_token: str = ""
     discord_channel_id: str = ""  # Channel ID where bot sends alerts
 
@@ -50,7 +47,7 @@ class Settings(BaseSettings):
     # History backfill — pages of ended matches to fetch per league on first run
     backfill_pages: int = 10
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     @property
     def tracked_league_ids(self) -> list[int]:

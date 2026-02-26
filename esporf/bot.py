@@ -5,9 +5,9 @@ Workflow:
 2. Every cycle: fetch newly ended matches and add to DB
 3. Fetch upcoming matches from AceOdds (full day) + ESportsBattle (~30 min) + Kambi + BetsAPI
 4. Fetch external stats from TotalCorner (per-player) + Forebet (predictions)
-5. Fetch real sportsbook odds from BetsAPI (bet365) + Kambi (pre-live)
+5. Fetch real sportsbook odds from BetsAPI (bet365) + Kambi (pre-live) + bwin (Volta) + FanDuel
 6. Run trend analysis and only surface picks with real odds + positive edge
-7. Send webhook alerts for qualifying odds-backed picks only
+7. Deliver alerts via Discord bot
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ from datetime import datetime
 from rich.console import Console
 
 from esporf.alerts.console import display_matchup_report, display_reports_by_league, display_scan_summary
-from esporf.alerts.webhooks import send_alerts
 from esporf.analysis.trends import TrendAnalyzer
 from esporf.config import settings
 from esporf.database import MatchDatabase
@@ -42,7 +41,9 @@ from esporf.models import (
 )
 from esporf.sources.aceodds import AceOddsClient
 from esporf.sources.betsapi import BetsAPIClient
+from esporf.sources.bwin import BwinClient
 from esporf.sources.esportsbattle import ESportsBattleClient
+from esporf.sources.fanduel import FanDuelClient
 from esporf.sources.forebet import ForebetClient
 from esporf.sources.kambi import KambiClient
 from esporf.sources.totalcorner import TotalCornerClient
@@ -72,11 +73,13 @@ def _match_key(m: UpcomingMatch) -> str:
 class EsporfBot:
     """The main bot that collects data, finds trends, and sends alerts."""
 
-    def __init__(self, *, skip_webhook_alerts: bool = False):
+    def __init__(self):
         self.api = BetsAPIClient()
         self.esb = ESportsBattleClient()
         self.ace = AceOddsClient()
         self.kambi = KambiClient()
+        self.bwin = BwinClient()
+        self.fanduel = FanDuelClient()
         self.tc = TotalCornerClient()
         self.forebet = ForebetClient()
         self.db = MatchDatabase()
@@ -84,7 +87,6 @@ class EsporfBot:
         self._running = False
         self._scan_count = 0
         self._alerted_keys: set[str] = set()
-        self._skip_webhook_alerts = skip_webhook_alerts
         self._load_alerted_keys()
 
     # ── Name enrichment ──────────────────────────────────────────
@@ -498,8 +500,8 @@ class EsporfBot:
 
         # Track matches confirmed as Volta by a dedicated Volta source.
         # BetsAPI misclassifies GG League / GT Leagues matches under Volta's
-        # league_id, so we only trust matches that ESportsBattle (the Volta
-        # tournament organizer) or AceOdds (bet365 Volta page) also list.
+        # league_id, so we only trust matches that ESportsBattle, AceOdds,
+        # or bwin (which has dedicated Volta competitions) also list.
         volta_confirmed: set[str] = set()
 
         try:
@@ -526,6 +528,19 @@ class EsporfBot:
                     all_upcoming.append(m)
         except Exception as e:
             logger.warning("ESportsBattle schedule failed: %s", e)
+
+        # 2.5. bwin: Volta schedule + odds (has pre-match odds well before kickoff)
+        try:
+            bwin_matches = await self.bwin.get_volta_schedule()
+            for m in bwin_matches:
+                key = _match_key(m)
+                volta_confirmed.add(key)
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    key_to_idx[key] = len(all_upcoming)
+                    all_upcoming.append(m)
+        except Exception as e:
+            logger.warning("bwin Volta schedule failed: %s", e)
 
         # 3. Kambi: schedule + odds in one shot (GG League, GT Leagues)
         kambi_league_ids: set[int] = set()
@@ -721,124 +736,64 @@ class EsporfBot:
             except Exception as e:
                 logger.warning("Late BetsAPI cross-ref failed: %s", e)
 
-        # Fetch real odds — BetsAPI first, then Kambi for anything still missing
-        # Skip kambi_ matches: they already have odds from get_schedule()
+        # ── Odds cascade ──────────────────────────────────────────
+        # Priority order:
+        # 1. BetsAPI (bet365) — broadest coverage, best for GG/GT leagues
+        # 2. Kambi — fills gaps, especially for GG/GT
+        # 3. bwin — primary Volta odds (available pre-match, unlike BetsAPI)
+        # 4. FanDuel — supplementary for anything still missing
+
+        # Skip kambi_/bwin_ matches: they already have odds from get_schedule()
         betsapi_matches = [
             m for m in all_upcoming
-            if not m.match_id.startswith(("esb_", "ace_", "kambi_"))
+            if not m.match_id.startswith(("esb_", "ace_", "kambi_", "bwin_"))
         ]
         if betsapi_matches:
             await self.api.fetch_odds_batch(betsapi_matches)
 
-        # Kambi fills remaining gaps (Volta matches that BetsAPI missed)
+        # Kambi fills gaps for GG/GT leagues
         kambi_fallback = 0
         try:
             kambi_fallback = await self.kambi.attach_odds(all_upcoming)
         except Exception as e:
             logger.warning("kambi odds fetch failed: %s", e)
 
-        # Volta odds polling — BetsAPI only lists Volta matches once they
-        # go in-play, but AceOdds/ESportsBattle find them 10-30 min ahead.
-        # For Volta matches starting within ~8 min that still lack odds,
-        # aggressively poll BetsAPI's in-play endpoint every 45s (up to 4
-        # retries) to catch them the moment they appear.
-        _VOLTA_LID = 38439
-        _VOLTA_RETRY_INTERVAL = 45   # seconds between retries
-        _VOLTA_MAX_RETRIES = 4       # max polls (~3 min total)
-        _VOLTA_WINDOW = 480          # only retry matches starting within 8 min
+        # bwin fills Volta gaps — bwin has Volta odds available well before
+        # kickoff, solving the timing problem BetsAPI has with Volta.
+        bwin_attached = 0
+        try:
+            bwin_attached = await self.bwin.attach_odds(all_upcoming)
+        except Exception as e:
+            logger.warning("bwin odds fetch failed: %s", e)
 
-        now = time.time()
-        volta_no_odds = [
-            m for m in all_upcoming
-            if m.league_id == _VOLTA_LID
-            and not (m.odds and m.odds.has_data)
-            and (m.start_time - now) <= _VOLTA_WINDOW
-        ]
-        if volta_no_odds and self._running:
-            console.print(
-                f"  [dim]{len(volta_no_odds)} Volta match(es) within "
-                f"{_VOLTA_WINDOW // 60}min missing odds — polling BetsAPI "
-                f"(up to {_VOLTA_MAX_RETRIES}x every {_VOLTA_RETRY_INTERVAL}s)...[/dim]"
-            )
+        # FanDuel — last resort for anything still missing
+        fanduel_attached = 0
+        try:
+            fanduel_attached = await self.fanduel.attach_odds(all_upcoming)
+        except Exception as e:
+            logger.warning("fanduel odds fetch failed: %s", e)
 
-            for attempt in range(1, _VOLTA_MAX_RETRIES + 1):
-                if not self._running:
-                    break
-
-                await asyncio.sleep(_VOLTA_RETRY_INTERVAL)
-
-                # Fetch fresh in-play + upcoming from BetsAPI
-                try:
-                    fresh: list[UpcomingMatch] = []
-                    fresh.extend(await self.api.get_inplay_matches(_VOLTA_LID))
-                    fresh.extend(await self.api.get_upcoming_matches(_VOLTA_LID))
-                except Exception as e:
-                    logger.warning("Volta poll %d/%d failed: %s", attempt, _VOLTA_MAX_RETRIES, e)
-                    continue
-
-                # Build lookup by player pair for cross-referencing
-                fresh_lookup: dict[tuple[str, str], list[UpcomingMatch]] = {}
-                for fm in fresh:
-                    h = extract_handle(fm.home).lower()
-                    a = extract_handle(fm.away).lower()
-                    pair = tuple(sorted([h, a]))
-                    fresh_lookup.setdefault(pair, []).append(fm)
-
-                # Resolve ace_/esb_ IDs to BetsAPI numeric IDs
-                still_missing = [
-                    m for m in volta_no_odds
-                    if not (m.odds and m.odds.has_data)
-                ]
-                if not still_missing:
-                    break
-
-                resolved = 0
-                for m in still_missing:
-                    if m.match_id.startswith(("esb_", "ace_")):
-                        h = extract_handle(m.home).lower()
-                        a = extract_handle(m.away).lower()
-                        pair = tuple(sorted([h, a]))
-                        for candidate in fresh_lookup.get(pair, []):
-                            if abs(candidate.start_time - m.start_time) <= 300:
-                                m.match_id = candidate.match_id
-                                resolved += 1
-                                break
-
-                # Fetch odds for matches with numeric BetsAPI IDs
-                retry_targets = [
-                    m for m in still_missing
-                    if not m.match_id.startswith(("esb_", "ace_", "kambi_"))
-                    and not (m.odds and m.odds.has_data)
-                ]
-                if retry_targets:
-                    await self.api.fetch_odds_batch(
-                        retry_targets, skip_bet365_prematch=True,
-                    )
-
-                got = sum(1 for m in volta_no_odds if m.odds and m.odds.has_data)
-                remaining = len(volta_no_odds) - got
-                if got:
-                    console.print(
-                        f"  [dim]Volta poll {attempt}/{_VOLTA_MAX_RETRIES}: "
-                        f"got odds for {got}/{len(volta_no_odds)} "
-                        f"(resolved {resolved} ID(s))[/dim]"
-                    )
-                if remaining == 0:
-                    break
-
+        # Report odds coverage
         odds_count = sum(1 for m in all_upcoming if m.odds and m.odds.has_data)
         if odds_count:
             sources = []
-            # Kambi schedule matches + Kambi fallback matches
             kambi_total = sum(
                 1 for m in all_upcoming
                 if m.odds and m.odds.has_data and m.match_id.startswith("kambi_")
             ) + kambi_fallback
-            betsapi_odds = odds_count - kambi_total
+            bwin_total = sum(
+                1 for m in all_upcoming
+                if m.odds and m.odds.has_data and m.match_id.startswith("bwin_")
+            ) + bwin_attached
+            betsapi_odds = odds_count - kambi_total - bwin_total - fanduel_attached
             if betsapi_odds > 0:
                 sources.append(f"BetsAPI: {betsapi_odds}")
             if kambi_total > 0:
                 sources.append(f"Kambi: {kambi_total}")
+            if bwin_total > 0:
+                sources.append(f"bwin: {bwin_total}")
+            if fanduel_attached > 0:
+                sources.append(f"FanDuel: {fanduel_attached}")
             console.print(
                 f"  [dim]Got odds for {odds_count}/{len(all_upcoming)} "
                 f"matches ({', '.join(sources)})[/dim]"
@@ -851,7 +806,7 @@ class EsporfBot:
             console.print(
                 f"  [yellow]No odds for any of {len(all_upcoming)} match(es). "
                 f"{no_id} still without BetsAPI ID, "
-                f"kambi attached {kambi_fallback}.[/yellow]"
+                f"kambi={kambi_fallback} bwin={bwin_attached} fanduel={fanduel_attached}[/yellow]"
             )
 
         # Persist odds snapshot for historical tracking
@@ -926,25 +881,10 @@ class EsporfBot:
 
         display_reports_by_league(reports)
 
-        # Send alerts only for picks backed by real sportsbook odds.
-        # Uses the content-based _match_key (players + start_time) instead
-        # of match_id, which can change between scans when BetsAPI
-        # cross-references an ace_/esb_ match with a different numeric ID.
-        # When running under the Discord bot, webhook alerts are skipped —
-        # the bot handles delivery via its own channel.send().
+        # Alert delivery is handled by the Discord bot (discord_bot.py).
+        # The scan loop just returns reports_with_picks; the bot's
+        # _send_alerts() method handles dedup, delivery, and pick recording.
         alerted_count = 0
-        if not self._skip_webhook_alerts:
-            new_reports = [
-                r for r in reports_with_picks
-                if _match_key(r.match) not in self._alerted_keys
-            ]
-            if new_reports:
-                new_reports.sort(key=lambda r: r.match.start_time)
-                await send_alerts(new_reports)
-                for r in new_reports:
-                    self._alerted_keys.add(_match_key(r.match))
-                    self.record_pick(r)
-                alerted_count = len(new_reports)
 
         # Log scan metadata
         self.db.log_scan(
@@ -982,7 +922,7 @@ class EsporfBot:
             f"  Poll interval: {interval}s\n"
             f"  Schedule: [bold green]AceOdds[/bold green] + ESportsBattle + [bold cyan]Kambi[/bold cyan] + BetsAPI\n"
             f"  External: [bold cyan]TotalCorner[/bold cyan] + Forebet\n"
-            f"  Odds: BetsAPI (bet365) + [bold cyan]Kambi[/bold cyan] (pre-live)\n"
+            f"  Odds: BetsAPI (bet365) + [bold cyan]Kambi[/bold cyan] + [bold green]bwin[/bold green] (Volta) + [bold cyan]FanDuel[/bold cyan]\n"
             f"  Mode: [bold green]Sportsbook odds only[/bold green] (no trend-only picks)\n"
             f"  Min hit rate: {settings.min_hit_rate:.0%}\n"
             f"  Min sample size: {settings.min_sample_size}\n"
@@ -1022,6 +962,8 @@ class EsporfBot:
             await self.esb.close()
             await self.ace.close()
             await self.kambi.close()
+            await self.bwin.close()
+            await self.fanduel.close()
             await self.tc.close()
             await self.forebet.close()
             self.db.close()
@@ -1067,6 +1009,8 @@ async def scan_once() -> None:
         await bot.esb.close()
         await bot.ace.close()
         await bot.kambi.close()
+        await bot.bwin.close()
+        await bot.fanduel.close()
         await bot.tc.close()
         await bot.forebet.close()
         bot.db.close()
