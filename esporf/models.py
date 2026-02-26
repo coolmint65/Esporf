@@ -573,6 +573,7 @@ class BetPick:
     moneyline: MoneylineOdds | None = None  # actual 1X2 odds if available
     spread_line: SpreadLine | None = None  # actual spread odds if available
     _spread_side: str | None = None  # "home" or "away" for spread picks
+    _ml_side: str | None = None  # "home", "away", or "draw" for moneyline picks
     edge: float | None = None  # hit_rate - implied_probability (value edge)
 
     @property
@@ -596,15 +597,17 @@ class BetPick:
             if self._spread_side == "home":
                 return self.spread_line.home_odds
             return self.spread_line.away_odds
-        if not self.odds_line:
-            return None
-        parsed = _parse_line(self.market)
-        if not parsed:
-            return None
-        direction = parsed[0]
-        if direction.lower() == "over":
-            return self.odds_line.over_odds
-        return self.odds_line.under_odds
+        if self.odds_line:
+            parsed = _parse_line(self.market)
+            if not parsed:
+                return None
+            direction = parsed[0]
+            if direction.lower() == "over":
+                return self.odds_line.over_odds
+            return self.odds_line.under_odds
+        if self.moneyline and self._ml_side:
+            return _ml_side_odds(self.moneyline, self._ml_side)
+        return None
 
     @property
     def american_odds(self) -> str | None:
@@ -613,15 +616,18 @@ class BetPick:
             if self._spread_side == "home":
                 return self.spread_line.home_american
             return self.spread_line.away_american
-        if not self.odds_line:
-            return None
-        parsed = _parse_line(self.market)
-        if not parsed:
-            return None
-        direction = parsed[0]
-        if direction.lower() == "over":
-            return self.odds_line.over_american
-        return self.odds_line.under_american
+        if self.odds_line:
+            parsed = _parse_line(self.market)
+            if not parsed:
+                return None
+            direction = parsed[0]
+            if direction.lower() == "over":
+                return self.odds_line.over_american
+            return self.odds_line.under_american
+        if self.moneyline and self._ml_side:
+            dec = _ml_side_odds(self.moneyline, self._ml_side)
+            return _decimal_to_american(dec) if dec else None
+        return None
 
     @property
     def ev_per_unit(self) -> float | None:
@@ -755,6 +761,7 @@ class MatchupReport:
         best_edge = 0.0
         best_odds_line: OddsLine | None = None
         best_ml: MoneylineOdds | None = None
+        best_ml_side: str | None = None
         best_spread: SpreadLine | None = None
         best_spread_side: str | None = None
 
@@ -812,6 +819,7 @@ class MatchupReport:
                     best_edge = edge
                     best_odds_line = odds_line
                     best_ml = None
+                    best_ml_side = None
                     best_spread = None
                     best_spread_side = None
 
@@ -864,6 +872,7 @@ class MatchupReport:
                     best_edge = edge
                     best_odds_line = None
                     best_ml = None
+                    best_ml_side = None
                     best_spread = spread
                     best_spread_side = side
 
@@ -892,6 +901,7 @@ class MatchupReport:
                     best_edge = edge
                     best_odds_line = None
                     best_ml = ml
+                    best_ml_side = _get_moneyline_side(market, self.match)
                     best_spread = None
                     best_spread_side = None
 
@@ -933,6 +943,7 @@ class MatchupReport:
             reason=reason,
             odds_line=best_odds_line,
             moneyline=best_ml,
+            _ml_side=best_ml_side,
             spread_line=best_spread,
             _spread_side=best_spread_side,
             edge=best_edge,
@@ -1006,6 +1017,32 @@ def _get_spread_side(player_name: str, match: UpcomingMatch) -> str | None:
         return "home"
     if away_handle in pn or pn in away_handle or match.away.lower() in pn:
         return "away"
+    return None
+
+
+def _ml_side_odds(ml: MoneylineOdds, side: str) -> float | None:
+    """Get the decimal odds for a specific moneyline side."""
+    if side == "home":
+        return ml.home_odds if ml.home_odds > 1.0 else None
+    if side == "away":
+        return ml.away_odds if ml.away_odds > 1.0 else None
+    if side == "draw":
+        return ml.draw_odds if ml.draw_odds > 1.0 else None
+    return None
+
+
+def _get_moneyline_side(market: str, match: UpcomingMatch) -> str | None:
+    """Determine the moneyline side (home/away/draw) from a market string."""
+    market_lower = market.lower()
+    if "draw" in market_lower:
+        return "draw"
+    if "win" in market_lower:
+        home_handle = extract_handle(match.home).lower()
+        away_handle = extract_handle(match.away).lower()
+        if home_handle in market_lower or match.home.lower() in market_lower:
+            return "home"
+        if away_handle in market_lower or match.away.lower() in market_lower:
+            return "away"
     return None
 
 

@@ -370,7 +370,11 @@ class EsporfBot:
             return PickResult.PUSH, 0.0
 
         if won:
-            payout = (pick.odds - 1.0) * pick.units if pick.odds else pick.units
+            if not pick.odds:
+                # No odds recorded — can't calculate real profit.
+                # Treat as a push to avoid inflating P/L numbers.
+                return PickResult.PUSH, 0.0
+            payout = (pick.odds - 1.0) * pick.units
             return PickResult.WIN, round(payout, 2)
         else:
             return PickResult.LOSS, round(-pick.units, 2)

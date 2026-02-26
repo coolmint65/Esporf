@@ -9,6 +9,17 @@ import { Loading, Empty } from '../components/Empty'
 
 const COLORS = { win: '#22c55e', loss: '#ef4444', push: '#f59e0b' }
 
+function Kickoff({ startTime }) {
+  const now = Math.floor(Date.now() / 1000)
+  const diff = startTime - now
+  if (diff <= 0) return <span className="text-win text-xs font-medium">LIVE</span>
+  const mins = Math.floor(diff / 60)
+  if (mins < 60) return <span className="text-xs text-muted">{mins}m</span>
+  const hrs = Math.floor(mins / 60)
+  const rem = mins % 60
+  return <span className="text-xs text-muted">{hrs}h{rem > 0 ? ` ${rem}m` : ''}</span>
+}
+
 export default function Dashboard() {
   const { data: stats, isLoading: statsLoading } = useQuery({
     queryKey: ['stats'],
@@ -157,7 +168,9 @@ export default function Dashboard() {
                   <Th>Match</Th>
                   <Th>Market</Th>
                   <Th>Units</Th>
+                  <Th>Odds</Th>
                   <Th>Edge</Th>
+                  <Th>Kickoff</Th>
                 </tr>
               </thead>
               <tbody>
@@ -169,7 +182,9 @@ export default function Dashboard() {
                     </Td>
                     <Td>{p.market}</Td>
                     <Td className="font-semibold">{p.units}u</Td>
+                    <Td>{p.odds_american || '--'}</Td>
                     <Td>{p.edge_pct || '--'}</Td>
+                    <Td><Kickoff startTime={p.start_time} /></Td>
                   </tr>
                 ))}
               </tbody>
