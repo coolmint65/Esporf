@@ -92,6 +92,36 @@ class BetsAPIClient:
 
         return data
 
+    # ── Single-event lookup ──────────────────────────────────────────
+
+    async def get_event_result(self, event_id: str) -> MatchResult | None:
+        """Fetch a single event's details and return a MatchResult if ended.
+
+        Uses BetsAPI's ``/v1/event/view`` endpoint to look up the event
+        directly by ID.  Returns None if the event is still in progress
+        or if the scores aren't available yet.
+        """
+        try:
+            data = await self._request_raw(
+                f"{_API_ROOT}/v1/event/view",
+                params={"event_id": event_id},
+            )
+        except Exception as e:
+            logger.debug("Event view failed for %s: %s", event_id, e)
+            return None
+
+        results = data.get("results", [])
+        if not results:
+            return None
+
+        ev = results[0] if isinstance(results, list) else results
+        # Only return a result if the event has ended (time_status 3 = ended)
+        if str(ev.get("time_status")) != "3":
+            return None
+
+        league_id = int(ev.get("league", {}).get("id", 0))
+        return self._parse_ended_match(ev, league_id)
+
     # ── Ended matches (for building history) ─────────────────────────
 
     async def get_ended_matches(self, league_id: int, page: int = 1) -> list[MatchResult]:

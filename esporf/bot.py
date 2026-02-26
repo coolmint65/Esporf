@@ -183,14 +183,16 @@ class EsporfBot:
     async def resolve_pending_picks(self) -> list[TrackedPick]:
         """Check pending picks against completed match results and resolve them.
 
-        Two-pass approach:
+        Three-pass approach:
         1. Fast pass — look up each pick in the local DB (direct match_id
            then H2H name+time).
-        2. Stale-pick pass — for picks whose match should have ended by now
-           (start_time + 20 min < now), fetch fresh ended matches from
-           BetsAPI for the relevant league(s) and re-attempt the lookup.
-           This catches picks stored with ace_/esb_ IDs that never got
-           cross-referenced to a BetsAPI numeric ID.
+        2. Targeted pass — for stale picks (match should have ended by now):
+           a) Picks with numeric BetsAPI IDs: directly query the event by ID
+              via ``/v1/event/view`` for an immediate, reliable result.
+           b) All stale picks: fetch 2 pages of recently ended matches per
+              league and re-attempt the DB lookup.
+        3. Void pass — picks stuck for >3 hours get voided (result never
+           coming back).
         """
         pending = self.db.get_pending_picks()
         if not pending:
@@ -208,42 +210,71 @@ class EsporfBot:
             else:
                 still_pending.append(pick)
 
-        # ── Pass 2: fetch fresh ended matches for stale picks ────────
+        # ── Pass 2: targeted lookups for stale picks ─────────────────
         # eSoccer matches last 8-12 min; 20 min buffer is generous.
         _STALE_THRESHOLD = 20 * 60  # seconds
         stale = [p for p in still_pending if (now - p.start_time) > _STALE_THRESHOLD]
 
         if stale:
-            # Determine which leagues need a fresh ended-match fetch
-            stale_leagues = {p.league_id for p in stale}
-            for lid in stale_leagues:
+            # 2a. Direct event view for picks with numeric BetsAPI IDs —
+            #     most reliable, one API call per pick, gets the exact result.
+            direct_resolved: set[int] = set()
+            for pick in stale:
+                if pick.match_id.startswith(("esb_", "ace_", "hudstats_", "kambi_", "bwin_")):
+                    continue  # non-BetsAPI ID, skip direct lookup
                 try:
-                    ended = await self.api.get_ended_matches(lid, page=1)
-                    added = self.db.insert_many(ended)
-                    if added:
+                    result = await self.api.get_event_result(pick.match_id)
+                    if result is not None:
+                        self.db.insert_many([result])
+                        self._resolve_one(pick, result, now, resolved)
+                        direct_resolved.add(pick.id)
                         logger.info(
-                            "Stale-pick resolver: added %d ended results for league %d",
-                            added, lid,
+                            "Direct event view resolved pick #%d: %s",
+                            pick.id, pick.match_id,
                         )
                 except Exception as e:
-                    logger.warning(
-                        "Stale-pick resolver: failed to fetch ended for league %d: %s",
-                        lid, e,
+                    logger.debug(
+                        "Direct event view failed for pick #%d (%s): %s",
+                        pick.id, pick.match_id, e,
                     )
 
-            # Re-attempt resolution with the freshly-inserted results
-            for pick in stale:
-                result_match = self._find_match_result(pick)
-                if result_match is not None:
-                    self._resolve_one(pick, result_match, now, resolved)
-                else:
-                    age_min = (now - pick.start_time) // 60
-                    logger.warning(
-                        "Pick #%d still unresolved (%d min old): %s vs %s [%s]",
-                        pick.id, age_min,
-                        extract_handle(pick.home), extract_handle(pick.away),
-                        pick.match_id,
-                    )
+            # Remove directly resolved picks from the stale list
+            stale = [p for p in stale if p.id not in direct_resolved]
+
+            # 2b. Bulk fetch ended matches (2 pages) for remaining stale picks
+            if stale:
+                stale_leagues = {p.league_id for p in stale}
+                for lid in stale_leagues:
+                    for page in (1, 2):
+                        try:
+                            ended = await self.api.get_ended_matches(lid, page=page)
+                            added = self.db.insert_many(ended)
+                            if added:
+                                logger.info(
+                                    "Stale-pick resolver: added %d ended results "
+                                    "for league %d (page %d)",
+                                    added, lid, page,
+                                )
+                        except Exception as e:
+                            logger.warning(
+                                "Stale-pick resolver: failed to fetch ended "
+                                "for league %d page %d: %s",
+                                lid, page, e,
+                            )
+
+                # Re-attempt resolution with the freshly-inserted results
+                for pick in stale:
+                    result_match = self._find_match_result(pick)
+                    if result_match is not None:
+                        self._resolve_one(pick, result_match, now, resolved)
+                    else:
+                        age_min = (now - pick.start_time) // 60
+                        logger.warning(
+                            "Pick #%d still unresolved (%d min old): %s vs %s [%s]",
+                            pick.id, age_min,
+                            extract_handle(pick.home), extract_handle(pick.away),
+                            pick.match_id,
+                        )
 
         # ── Pass 3: void ancient pending picks ────────────────────
         # eSoccer matches last 8-12 min. If a pick is still pending
