@@ -3,7 +3,7 @@
 Workflow:
 1. On first run, backfill match history from BetsAPI into SQLite
 2. Every cycle: fetch newly ended matches and add to DB
-3. Fetch upcoming matches from AceOdds (full day) + ESportsBattle (~30 min) + Kambi + BetsAPI
+3. Fetch upcoming matches from AceOdds (full day) + ESportsBattle (~30 min) + HUDstats (GG League) + Kambi + BetsAPI
 4. Fetch external stats from TotalCorner (per-player) + Forebet (predictions)
 5. Fetch real sportsbook odds from BetsAPI (bet365) + Kambi (pre-live) + bwin (Volta) + FanDuel
 6. Run trend analysis and only surface picks with real odds + positive edge
@@ -45,6 +45,7 @@ from esporf.sources.bwin import BwinClient
 from esporf.sources.esportsbattle import ESportsBattleClient
 from esporf.sources.fanduel import FanDuelClient
 from esporf.sources.forebet import ForebetClient
+from esporf.sources.hudstats import HUDstatsClient
 from esporf.sources.kambi import KambiClient
 from esporf.sources.totalcorner import TotalCornerClient
 
@@ -78,6 +79,7 @@ class EsporfBot:
         self.esb = ESportsBattleClient()
         self.ace = AceOddsClient()
         self.kambi = KambiClient()
+        self.hudstats = HUDstatsClient()
         self.bwin = BwinClient()
         self.fanduel = FanDuelClient()
         self.tc = TotalCornerClient()
@@ -529,7 +531,19 @@ class EsporfBot:
         except Exception as e:
             logger.warning("ESportsBattle schedule failed: %s", e)
 
-        # 2.5. bwin: Volta schedule + odds (has pre-match odds well before kickoff)
+        # 2.5. HUDstats: GG League schedule (30+ min lookahead, way ahead of BetsAPI)
+        try:
+            hudstats_matches = await self.hudstats.get_schedule()
+            for m in hudstats_matches:
+                key = _match_key(m)
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    key_to_idx[key] = len(all_upcoming)
+                    all_upcoming.append(m)
+        except Exception as e:
+            logger.warning("HUDstats schedule failed: %s", e)
+
+        # 2.6. bwin: Volta schedule + odds (has pre-match odds well before kickoff)
         # bwin returns matches WITH odds pre-attached. If AceOdds/ESportsBattle
         # already added the same match (without odds), merge the odds in.
         try:
@@ -580,7 +594,7 @@ class EsporfBot:
                         all_upcoming.append(m)
                     elif key in key_to_idx:
                         existing = all_upcoming[key_to_idx[key]]
-                        if existing.match_id.startswith(("esb_", "ace_")):
+                        if existing.match_id.startswith(("esb_", "ace_", "hudstats_")):
                             existing.match_id = m.match_id
                             logger.debug(
                                 "Cross-referenced %s vs %s with BetsAPI ID %s",
@@ -596,12 +610,12 @@ class EsporfBot:
         # Match by player pair + approximate time (within 5 min) to fix this.
         still_unresolved = [
             (i, m) for i, m in enumerate(all_upcoming)
-            if m.match_id.startswith(("esb_", "ace_"))
+            if m.match_id.startswith(("esb_", "ace_", "hudstats_"))
         ]
         if still_unresolved:
             betsapi_lookup: dict[tuple[str, str], list[tuple[int, UpcomingMatch]]] = {}
             for i, m in enumerate(all_upcoming):
-                if m.match_id.startswith(("esb_", "ace_")):
+                if m.match_id.startswith(("esb_", "ace_", "hudstats_")):
                     continue
                 h = extract_handle(m.home).lower()
                 a = extract_handle(m.away).lower()
@@ -700,7 +714,7 @@ class EsporfBot:
         # so a quick re-check here can catch matches that just appeared.
         still_unresolved = [
             m for m in all_upcoming
-            if m.match_id.startswith(("esb_", "ace_"))
+            if m.match_id.startswith(("esb_", "ace_", "hudstats_"))
         ]
         if still_unresolved:
             console.print(
@@ -756,7 +770,7 @@ class EsporfBot:
         # Skip kambi_/bwin_ matches: they already have odds from get_schedule()
         betsapi_matches = [
             m for m in all_upcoming
-            if not m.match_id.startswith(("esb_", "ace_", "kambi_", "bwin_"))
+            if not m.match_id.startswith(("esb_", "ace_", "hudstats_", "kambi_", "bwin_"))
         ]
         if betsapi_matches:
             await self.api.fetch_odds_batch(betsapi_matches)
@@ -840,7 +854,7 @@ class EsporfBot:
 
                 resolved = 0
                 for m in still_missing:
-                    if m.match_id.startswith(("esb_", "ace_")):
+                    if m.match_id.startswith(("esb_", "ace_", "hudstats_")):
                         h = extract_handle(m.home).lower()
                         a = extract_handle(m.away).lower()
                         pair = tuple(sorted([h, a]))
@@ -853,7 +867,7 @@ class EsporfBot:
                 # Fetch odds for matches with numeric BetsAPI IDs
                 retry_targets = [
                     m for m in still_missing
-                    if not m.match_id.startswith(("esb_", "ace_", "kambi_", "bwin_"))
+                    if not m.match_id.startswith(("esb_", "ace_", "hudstats_", "kambi_", "bwin_"))
                     and not (m.odds and m.odds.has_data)
                 ]
                 if retry_targets:
@@ -900,7 +914,7 @@ class EsporfBot:
         else:
             no_id = sum(
                 1 for m in all_upcoming
-                if m.match_id.startswith(("esb_", "ace_"))
+                if m.match_id.startswith(("esb_", "ace_", "hudstats_"))
             )
             console.print(
                 f"  [yellow]No odds for any of {len(all_upcoming)} match(es). "
@@ -1031,7 +1045,7 @@ class EsporfBot:
             f"[bold blue]Esporf Odds Bot Starting[/bold blue]\n"
             f"  Tracking leagues: {settings.league_ids}\n"
             f"  Poll interval: {interval}s\n"
-            f"  Schedule: [bold green]AceOdds[/bold green] + ESportsBattle + [bold cyan]Kambi[/bold cyan] + BetsAPI\n"
+            f"  Schedule: [bold green]AceOdds[/bold green] + ESportsBattle + [bold green]HUDstats[/bold green] + [bold cyan]Kambi[/bold cyan] + BetsAPI\n"
             f"  External: [bold cyan]TotalCorner[/bold cyan] + Forebet\n"
             f"  Odds: BetsAPI (bet365) + [bold cyan]Kambi[/bold cyan] + [bold green]bwin[/bold green] (Volta) + [bold cyan]FanDuel[/bold cyan]\n"
             f"  Mode: [bold green]Sportsbook odds only[/bold green] (no trend-only picks)\n"
@@ -1073,6 +1087,7 @@ class EsporfBot:
             await self.esb.close()
             await self.ace.close()
             await self.kambi.close()
+            await self.hudstats.close()
             await self.bwin.close()
             await self.fanduel.close()
             await self.tc.close()
@@ -1120,6 +1135,7 @@ async def scan_once() -> None:
         await bot.esb.close()
         await bot.ace.close()
         await bot.kambi.close()
+        await bot.hudstats.close()
         await bot.bwin.close()
         await bot.fanduel.close()
         await bot.tc.close()

@@ -243,6 +243,7 @@ class EsporfDiscordBot(discord.Client):
         await self.scanner.esb.close()
         await self.scanner.ace.close()
         await self.scanner.kambi.close()
+        await self.scanner.hudstats.close()
         await self.scanner.bwin.close()
         await self.scanner.fanduel.close()
         await self.scanner.tc.close()
