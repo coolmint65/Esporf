@@ -761,6 +761,10 @@ class EsporfBot:
         # like "Senya" — look up their last known team from the DB.
         self._enrich_team_names(all_upcoming)
 
+        # Persist upcoming matches so the /api/schedule endpoint can
+        # show them alongside completed results.
+        self.db.save_upcoming(all_upcoming)
+
         # Keep matches starting within lookahead window
         lookahead = settings.schedule_lookahead
         imminent = [m for m in all_upcoming if m.starts_within(lookahead)]

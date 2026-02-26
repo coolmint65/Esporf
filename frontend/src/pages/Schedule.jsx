@@ -51,42 +51,58 @@ function PlayerStat({ stats, side }) {
 }
 
 function MatchRow({ match, onClick }) {
-  const homeWon = match.home_score > match.away_score
-  const awayWon = match.away_score > match.home_score
+  const isUpcoming = match.status === 'upcoming'
+  const isLive = match.status === 'live'
+  const homeWon = !isUpcoming && !isLive && match.home_score > match.away_score
+  const awayWon = !isUpcoming && !isLive && match.away_score > match.home_score
   const time = new Date(match.start_time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+
+  const borderClass = isLive
+    ? 'border-accent/50'
+    : isUpcoming
+    ? 'border-border/50'
+    : 'border-border'
 
   return (
     <div
       onClick={() => onClick(match.match_id)}
-      className="group bg-surface2/50 hover:bg-surface2 border border-border rounded-lg px-4 py-3 cursor-pointer transition-colors"
+      className={`group bg-surface2/50 hover:bg-surface2 border ${borderClass} rounded-lg px-4 py-3 cursor-pointer transition-colors`}
     >
       <div className="flex items-center gap-3">
         {/* Time */}
         <div className="w-14 shrink-0 text-center">
           <div className="text-xs text-muted">{time}</div>
+          {isLive && <div className="text-[10px] text-accent font-semibold">LIVE</div>}
+          {isUpcoming && <div className="text-[10px] text-muted">Upcoming</div>}
         </div>
 
         {/* Home side */}
         <div className="flex-1 min-w-0">
-          <div className={`text-sm font-medium truncate ${homeWon ? 'text-win' : ''}`}>
+          <div className={`text-sm font-medium truncate ${homeWon ? 'text-win' : ''} ${isUpcoming ? 'text-muted' : ''}`}>
             {match.home}
           </div>
           <PlayerStat stats={match.home_stats} side="home" />
         </div>
 
-        {/* Score */}
+        {/* Score or VS */}
         <div className="w-20 shrink-0 text-center">
-          <div className="text-lg font-bold tracking-wider">
-            <span className={homeWon ? 'text-win' : ''}>{match.home_score}</span>
-            <span className="text-muted mx-1">-</span>
-            <span className={awayWon ? 'text-win' : ''}>{match.away_score}</span>
-          </div>
-          <div className="text-[10px] text-muted">{match.total_goals} goals</div>
+          {isUpcoming || isLive ? (
+            <div className={`text-lg font-bold ${isLive ? 'text-accent' : 'text-muted'}`}>vs</div>
+          ) : (
+            <>
+              <div className="text-lg font-bold tracking-wider">
+                <span className={homeWon ? 'text-win' : ''}>{match.home_score}</span>
+                <span className="text-muted mx-1">-</span>
+                <span className={awayWon ? 'text-win' : ''}>{match.away_score}</span>
+              </div>
+              <div className="text-[10px] text-muted">{match.total_goals} goals</div>
+            </>
+          )}
         </div>
 
         {/* Away side */}
         <div className="flex-1 min-w-0">
-          <div className={`text-sm font-medium truncate text-right ${awayWon ? 'text-win' : ''}`}>
+          <div className={`text-sm font-medium truncate text-right ${awayWon ? 'text-win' : ''} ${isUpcoming ? 'text-muted' : ''}`}>
             {match.away}
           </div>
           <PlayerStat stats={match.away_stats} side="away" />

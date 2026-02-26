@@ -224,6 +224,7 @@ class ScheduleMatchResponse(BaseModel):
     winner: str | None
     start_time: int
     start_time_fmt: str
+    status: str = "completed"  # "completed", "upcoming", or "live"
     home_stats: dict | None = None
     away_stats: dict | None = None
     has_pick: bool = False
@@ -918,40 +919,25 @@ def get_schedule(
         display_tz = ZoneInfo(settings.timezone)
         date_groups: dict[str, list[ScheduleMatchResponse]] = {}
 
+        def _build_stats(handle: str, lid: int) -> dict | None:
+            form = _get_form(handle, lid)
+            if not form:
+                return None
+            return {
+                "handle": form.handle,
+                "win_rate_pct": f"{form.win_rate:.0%}",
+                "avg_goals": round(form.avg_total_goals, 1),
+                "over_2_5_pct": f"{form.over_2_5_rate:.0%}",
+                "over_4_5_pct": f"{form.over_4_5_rate:.0%}",
+                "form_trend": form.form_trend,
+                "tier": form.tier.label,
+                "matches": form.matches_played,
+            }
+
+        # Completed matches
         for m in matches:
             dt = datetime.fromtimestamp(m.start_time, tz=display_tz)
             date_key = dt.strftime("%Y-%m-%d")
-
-            home_handle = extract_handle(m.home)
-            away_handle = extract_handle(m.away)
-            home_form = _get_form(home_handle, m.league_id)
-            away_form = _get_form(away_handle, m.league_id)
-
-            home_stats = None
-            if home_form:
-                home_stats = {
-                    "handle": home_form.handle,
-                    "win_rate_pct": f"{home_form.win_rate:.0%}",
-                    "avg_goals": round(home_form.avg_total_goals, 1),
-                    "over_2_5_pct": f"{home_form.over_2_5_rate:.0%}",
-                    "over_4_5_pct": f"{home_form.over_4_5_rate:.0%}",
-                    "form_trend": home_form.form_trend,
-                    "tier": home_form.tier.label,
-                    "matches": home_form.matches_played,
-                }
-
-            away_stats = None
-            if away_form:
-                away_stats = {
-                    "handle": away_form.handle,
-                    "win_rate_pct": f"{away_form.win_rate:.0%}",
-                    "avg_goals": round(away_form.avg_total_goals, 1),
-                    "over_2_5_pct": f"{away_form.over_2_5_rate:.0%}",
-                    "over_4_5_pct": f"{away_form.over_4_5_rate:.0%}",
-                    "form_trend": away_form.form_trend,
-                    "tier": away_form.tier.label,
-                    "matches": away_form.matches_played,
-                }
 
             entry = ScheduleMatchResponse(
                 match_id=m.match_id,
@@ -966,15 +952,46 @@ def get_schedule(
                 winner=m.winner,
                 start_time=m.start_time,
                 start_time_fmt=_fmt_time(m.start_time),
-                home_stats=home_stats,
-                away_stats=away_stats,
+                status="completed",
+                home_stats=_build_stats(extract_handle(m.home), m.league_id),
+                away_stats=_build_stats(extract_handle(m.away), m.league_id),
                 has_pick=m.match_id in pick_match_ids,
+            )
+            date_groups.setdefault(date_key, []).append(entry)
+
+        # Upcoming / live matches from the latest scan
+        completed_ids = {m.match_id for m in matches}
+        upcoming_rows = db.get_upcoming(league_id)
+        for row in upcoming_rows:
+            if row["match_id"] in completed_ids:
+                continue
+            dt = datetime.fromtimestamp(row["start_time"], tz=display_tz)
+            date_key = dt.strftime("%Y-%m-%d")
+            is_live = bool(row["is_live"])
+
+            entry = ScheduleMatchResponse(
+                match_id=row["match_id"],
+                league=league_display_name(row["league_id"]),
+                league_id=row["league_id"],
+                home=row["home"],
+                away=row["away"],
+                home_score=0,
+                away_score=0,
+                total_goals=0,
+                score="vs",
+                winner=None,
+                start_time=row["start_time"],
+                start_time_fmt=_fmt_time(row["start_time"]),
+                status="live" if is_live else "upcoming",
+                home_stats=_build_stats(extract_handle(row["home"]), row["league_id"]),
+                away_stats=_build_stats(extract_handle(row["away"]), row["league_id"]),
+                has_pick=row["match_id"] in pick_match_ids,
             )
             date_groups.setdefault(date_key, []).append(entry)
 
         result = []
         for date_key in sorted(date_groups.keys(), reverse=True):
-            group = date_groups[date_key]
+            group = sorted(date_groups[date_key], key=lambda x: x.start_time, reverse=True)
             result.append(ScheduleResponse(
                 date=date_key,
                 matches=group,

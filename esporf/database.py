@@ -121,6 +121,18 @@ CREATE TABLE IF NOT EXISTS scan_log (
 );
 """
 
+CREATE_UPCOMING_TABLE = """
+CREATE TABLE IF NOT EXISTS upcoming_matches (
+    match_id TEXT PRIMARY KEY,
+    league_id INTEGER NOT NULL,
+    home TEXT NOT NULL,
+    away TEXT NOT NULL,
+    start_time INTEGER NOT NULL,
+    is_live INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL
+);
+"""
+
 CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_matches_home ON matches(home);",
     "CREATE INDEX IF NOT EXISTS idx_matches_away ON matches(away);",
@@ -136,6 +148,8 @@ CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_odds_league ON odds_snapshots(league_id);",
     "CREATE INDEX IF NOT EXISTS idx_odds_match_line ON odds_snapshots(match_id, line);",
     "CREATE INDEX IF NOT EXISTS idx_scan_log_time ON scan_log(started_at DESC);",
+    "CREATE INDEX IF NOT EXISTS idx_upcoming_time ON upcoming_matches(start_time);",
+    "CREATE INDEX IF NOT EXISTS idx_upcoming_league ON upcoming_matches(league_id);",
 ]
 
 
@@ -161,6 +175,7 @@ class MatchDatabase:
         conn.execute(CREATE_PLAYER_FORM_TABLE)
         conn.execute(CREATE_ODDS_SNAPSHOTS_TABLE)
         conn.execute(CREATE_SCAN_LOG_TABLE)
+        conn.execute(CREATE_UPCOMING_TABLE)
         self._deduplicate_picks(conn)
         for idx_sql in CREATE_INDEXES:
             conn.execute(idx_sql)
@@ -948,6 +963,52 @@ class MatchDatabase:
         conn = self._get_conn()
         row = conn.execute("SELECT COUNT(*) as cnt FROM scan_log").fetchone()
         return row["cnt"]
+
+    # ── Upcoming matches ─────────────────────────────────────────────
+
+    def save_upcoming(self, matches: list) -> int:
+        """Persist upcoming matches from the latest scan.
+
+        Accepts a list of UpcomingMatch objects. Uses INSERT OR REPLACE
+        so repeated scans update start_time / is_live if they change.
+        Returns the number of rows written.
+        """
+        if not matches:
+            return 0
+        conn = self._get_conn()
+        now = int(time.time())
+        rows = [
+            (m.match_id, m.league_id, m.home, m.away, m.start_time,
+             int(m.is_live), now)
+            for m in matches
+        ]
+        conn.executemany(
+            """INSERT OR REPLACE INTO upcoming_matches
+               (match_id, league_id, home, away, start_time, is_live, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+        # Remove stale entries: matches whose start_time is more than
+        # 30 minutes in the past are likely completed.
+        conn.execute(
+            "DELETE FROM upcoming_matches WHERE start_time < ?",
+            (now - 1800,),
+        )
+        conn.commit()
+        return len(rows)
+
+    def get_upcoming(self, league_id: int | None = None) -> list[sqlite3.Row]:
+        """Return upcoming matches, optionally filtered by league."""
+        conn = self._get_conn()
+        if league_id:
+            return conn.execute(
+                """SELECT * FROM upcoming_matches
+                   WHERE league_id = ? ORDER BY start_time""",
+                (league_id,),
+            ).fetchall()
+        return conn.execute(
+            "SELECT * FROM upcoming_matches ORDER BY start_time"
+        ).fetchall()
 
     # ── Helpers ──────────────────────────────────────────────────────
 
