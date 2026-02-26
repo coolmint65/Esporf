@@ -1,0 +1,203 @@
+import { useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { useNavigate } from 'react-router-dom'
+import { api } from '../lib/api'
+import Card from '../components/Card'
+import Badge from '../components/Badge'
+import { Loading, Empty, ErrorMsg } from '../components/Empty'
+
+const TIER_COLORS = {
+  Elite: 'text-purple',
+  Solid: 'text-win',
+  Watchlist: 'text-push',
+  Blocked: 'text-loss',
+  New: 'text-accent',
+}
+
+const TREND_ICONS = {
+  rising: '\u25B2',
+  falling: '\u25BC',
+  stable: '\u25CF',
+  insufficient: '\u25CB',
+}
+
+const TREND_COLORS = {
+  rising: 'text-win',
+  falling: 'text-loss',
+  stable: 'text-muted',
+  insufficient: 'text-muted',
+}
+
+function PlayerStat({ stats, side }) {
+  if (!stats) return <div className="text-xs text-muted">No data</div>
+
+  return (
+    <div className={`flex flex-col gap-0.5 ${side === 'away' ? 'items-end' : 'items-start'}`}>
+      <div className="flex items-center gap-1.5">
+        <span className={`text-xs font-semibold ${TIER_COLORS[stats.tier] || 'text-muted'}`}>
+          {stats.tier}
+        </span>
+        <span className={`text-[10px] ${TREND_COLORS[stats.form_trend]}`}>
+          {TREND_ICONS[stats.form_trend]}
+        </span>
+      </div>
+      <div className="flex gap-2 text-[11px] text-muted">
+        <span>WR {stats.win_rate_pct}</span>
+        <span>{stats.avg_goals}g</span>
+        <span>O4.5 {stats.over_4_5_pct}</span>
+      </div>
+    </div>
+  )
+}
+
+function MatchRow({ match, onClick }) {
+  const homeWon = match.home_score > match.away_score
+  const awayWon = match.away_score > match.home_score
+  const time = new Date(match.start_time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+
+  return (
+    <div
+      onClick={() => onClick(match.match_id)}
+      className="group bg-surface2/50 hover:bg-surface2 border border-border rounded-lg px-4 py-3 cursor-pointer transition-colors"
+    >
+      <div className="flex items-center gap-3">
+        {/* Time */}
+        <div className="w-14 shrink-0 text-center">
+          <div className="text-xs text-muted">{time}</div>
+        </div>
+
+        {/* Home side */}
+        <div className="flex-1 min-w-0">
+          <div className={`text-sm font-medium truncate ${homeWon ? 'text-win' : ''}`}>
+            {match.home}
+          </div>
+          <PlayerStat stats={match.home_stats} side="home" />
+        </div>
+
+        {/* Score */}
+        <div className="w-20 shrink-0 text-center">
+          <div className="text-lg font-bold tracking-wider">
+            <span className={homeWon ? 'text-win' : ''}>{match.home_score}</span>
+            <span className="text-muted mx-1">-</span>
+            <span className={awayWon ? 'text-win' : ''}>{match.away_score}</span>
+          </div>
+          <div className="text-[10px] text-muted">{match.total_goals} goals</div>
+        </div>
+
+        {/* Away side */}
+        <div className="flex-1 min-w-0">
+          <div className={`text-sm font-medium truncate text-right ${awayWon ? 'text-win' : ''}`}>
+            {match.away}
+          </div>
+          <PlayerStat stats={match.away_stats} side="away" />
+        </div>
+
+        {/* League + Pick badge */}
+        <div className="w-24 shrink-0 flex flex-col items-end gap-1">
+          <span className="text-[10px] text-muted uppercase tracking-wider">{match.league}</span>
+          {match.has_pick && <Badge variant="pending">Pick</Badge>}
+        </div>
+
+        {/* Arrow */}
+        <div className="w-4 text-muted opacity-0 group-hover:opacity-100 transition-opacity">
+          ›
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export default function Schedule() {
+  const navigate = useNavigate()
+  const [days, setDays] = useState(1)
+  const [leagueId, setLeagueId] = useState('')
+
+  const params = { days }
+  if (leagueId) params.league_id = leagueId
+
+  const { data: schedule, isLoading, error } = useQuery({
+    queryKey: ['schedule', params],
+    queryFn: () => api.schedule(params),
+    refetchInterval: 30_000,
+  })
+
+  const handleMatchClick = (matchId) => {
+    navigate(`/schedule/${encodeURIComponent(matchId)}`)
+  }
+
+  const totalMatches = schedule?.reduce((sum, g) => sum + g.total, 0) ?? 0
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl font-bold tracking-tight">Schedule</h1>
+        <p className="text-sm text-muted mt-1">
+          Match schedule with player stats {totalMatches > 0 && `\u2014 ${totalMatches} matches`}
+        </p>
+      </div>
+
+      {/* Filters */}
+      <div className="flex flex-wrap items-center gap-4">
+        <label className="flex items-center gap-2 text-sm">
+          <span className="text-muted">Period</span>
+          <select
+            value={days}
+            onChange={(e) => setDays(Number(e.target.value))}
+            className="bg-surface2 border border-border rounded-lg px-3 py-1.5 text-sm text-text outline-none focus:border-accent"
+          >
+            <option value={1}>Today</option>
+            <option value={2}>Last 2 days</option>
+            <option value={3}>Last 3 days</option>
+            <option value={7}>Last week</option>
+          </select>
+        </label>
+        <label className="flex items-center gap-2 text-sm">
+          <span className="text-muted">League</span>
+          <select
+            value={leagueId}
+            onChange={(e) => setLeagueId(e.target.value)}
+            className="bg-surface2 border border-border rounded-lg px-3 py-1.5 text-sm text-text outline-none focus:border-accent"
+          >
+            <option value="">All</option>
+            <option value="42648">GG League</option>
+            <option value="42649">GT Leagues</option>
+            <option value="38439">Volta</option>
+          </select>
+        </label>
+      </div>
+
+      {isLoading ? <Loading /> : error ? <ErrorMsg error={error} /> :
+        !schedule?.length ? <Empty text="No matches found for this period" /> :
+          schedule.map((group) => (
+            <Card key={group.date} title={formatDate(group.date)} icon iconColor="bg-accent">
+              <div className="text-xs text-muted mb-3">{group.total} matches</div>
+              <div className="space-y-2">
+                {group.matches.map((match) => (
+                  <MatchRow
+                    key={match.match_id}
+                    match={match}
+                    onClick={handleMatchClick}
+                  />
+                ))}
+              </div>
+            </Card>
+          ))
+      }
+    </div>
+  )
+}
+
+function formatDate(dateStr) {
+  const d = new Date(dateStr + 'T00:00:00Z')
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const matchDate = new Date(d)
+  matchDate.setHours(0, 0, 0, 0)
+
+  const diffDays = Math.round((today - matchDate) / 86400000)
+
+  if (diffDays === 0) return 'Today'
+  if (diffDays === 1) return 'Yesterday'
+
+  return d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })
+}

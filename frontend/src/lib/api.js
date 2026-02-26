@@ -25,4 +25,6 @@ export const api = {
   recentMatches:(params = {}) => fetchApi('/matches/recent', params),
   leagues:      ()            => fetchApi('/leagues'),
   scanStatus:   ()            => fetchApi('/scan/status'),
+  schedule:     (params = {}) => fetchApi('/schedule', params),
+  matchDetail:  (matchId)     => fetchApi(`/match/${encodeURIComponent(matchId)}/detail`),
 };

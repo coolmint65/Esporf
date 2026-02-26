@@ -3,11 +3,12 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '../lib/api'
 
 const nav = [
-  { to: '/',        label: 'Dashboard', icon: '◫' },
-  { to: '/picks',   label: 'Picks',     icon: '◉' },
-  { to: '/players', label: 'Players',   icon: '⬡' },
-  { to: '/matches', label: 'Matches',   icon: '⬢' },
-  { to: '/leagues', label: 'Leagues',   icon: '◈' },
+  { to: '/',         label: 'Dashboard', icon: '◫' },
+  { to: '/schedule', label: 'Schedule',  icon: '▦' },
+  { to: '/picks',    label: 'Picks',     icon: '◉' },
+  { to: '/players',  label: 'Players',   icon: '⬡' },
+  { to: '/matches',  label: 'Matches',   icon: '⬢' },
+  { to: '/leagues',  label: 'Leagues',   icon: '◈' },
 ]
 
 export default function Layout() {
