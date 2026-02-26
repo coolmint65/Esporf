@@ -208,6 +208,7 @@ class PickResult(Enum):
     WIN = "win"
     LOSS = "loss"
     PUSH = "push"
+    VOID = "void"
 
 
 @dataclass
@@ -238,7 +239,7 @@ class TrackedPick:
 
     @property
     def is_resolved(self) -> bool:
-        return self.result != PickResult.PENDING
+        return self.result not in (PickResult.PENDING,)
 
     @property
     def result_emoji(self) -> str:
@@ -247,6 +248,7 @@ class TrackedPick:
             PickResult.LOSS: "\u274c",
             PickResult.PUSH: "\u2796",
             PickResult.PENDING: "\u23f3",
+            PickResult.VOID: "\u26d4",
         }[self.result]
 
     @property

@@ -543,7 +543,7 @@ class MatchDatabase:
             f"SELECT result, profit, units FROM picks{where}", params
         ).fetchall()
 
-        wins = losses = pushes = pending = 0
+        wins = losses = pushes = pending = voids = 0
         total_profit = 0.0
         units_wagered = 0.0
 
@@ -559,12 +559,15 @@ class MatchDatabase:
                     pushes += 1
                 case "pending":
                     pending += 1
+                case "void":
+                    voids += 1
 
         return {
             "wins": wins,
             "losses": losses,
             "pushes": pushes,
             "pending": pending,
+            "voids": voids,
             "total": wins + losses + pushes,
             "profit": total_profit,
             "units_wagered": units_wagered,

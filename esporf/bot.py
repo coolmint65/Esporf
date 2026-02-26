@@ -245,6 +245,33 @@ class EsporfBot:
                         pick.match_id,
                     )
 
+        # ── Pass 3: void ancient pending picks ────────────────────
+        # eSoccer matches last 8-12 min. If a pick is still pending
+        # after 3 hours the result is never coming back — void it so
+        # it doesn't sit in the live-picks list forever.
+        _VOID_THRESHOLD = 3 * 3600  # 3 hours
+        voided = 0
+        for pick in self.db.get_pending_picks():
+            if (now - pick.start_time) > _VOID_THRESHOLD:
+                self.db.resolve_pick(
+                    pick_id=pick.id,
+                    result=PickResult.VOID,
+                    profit=0.0,
+                    home_score=pick.home_score or 0,
+                    away_score=pick.away_score or 0,
+                    resolved_at=now,
+                )
+                voided += 1
+                logger.info(
+                    "Voided stale pick #%d (%.1fh old): %s vs %s",
+                    pick.id, (now - pick.start_time) / 3600,
+                    extract_handle(pick.home), extract_handle(pick.away),
+                )
+        if voided:
+            console.print(
+                f"  [dim]Voided {voided} stale pick(s) (>3h old)[/dim]"
+            )
+
         if resolved:
             console.print(
                 f"  [dim]Resolved {len(resolved)} pick(s): "
