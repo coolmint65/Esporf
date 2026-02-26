@@ -188,16 +188,18 @@ export default function Schedule() {
 }
 
 function formatDate(dateStr) {
-  const d = new Date(dateStr + 'T00:00:00Z')
+  // dateStr is YYYY-MM-DD in the server's display timezone (US/Eastern)
+  // Parse as local date parts to avoid UTC offset issues
+  const [year, month, day] = dateStr.split('-').map(Number)
+  const matchDate = new Date(year, month - 1, day)
+
   const today = new Date()
   today.setHours(0, 0, 0, 0)
-  const matchDate = new Date(d)
-  matchDate.setHours(0, 0, 0, 0)
 
   const diffDays = Math.round((today - matchDate) / 86400000)
 
   if (diffDays === 0) return 'Today'
   if (diffDays === 1) return 'Yesterday'
 
-  return d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })
+  return matchDate.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })
 }

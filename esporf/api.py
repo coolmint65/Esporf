@@ -9,6 +9,7 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -913,11 +914,12 @@ def get_schedule(
                 form_cache[key] = db.get_player_form(handle, league_id=lid)
             return form_cache[key]
 
-        # Group by date
+        # Group by date in the configured display timezone
+        display_tz = ZoneInfo(settings.timezone)
         date_groups: dict[str, list[ScheduleMatchResponse]] = {}
 
         for m in matches:
-            dt = datetime.fromtimestamp(m.start_time, tz=timezone.utc)
+            dt = datetime.fromtimestamp(m.start_time, tz=display_tz)
             date_key = dt.strftime("%Y-%m-%d")
 
             home_handle = extract_handle(m.home)
