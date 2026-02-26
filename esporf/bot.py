@@ -1,4 +1,4 @@
-"""Main bot loop — polls for upcoming matches, finds odds-backed picks, sends alerts.
+"""Main bot loop — polls for upcoming matches, finds odds-backed picks, records them.
 
 Workflow:
 1. On first run, backfill match history from BetsAPI into SQLite
@@ -7,7 +7,7 @@ Workflow:
 4. Fetch external stats from TotalCorner (per-player) + Forebet (predictions)
 5. Fetch real sportsbook odds from BetsAPI (bet365) + Kambi (pre-live) + bwin (Volta) + FanDuel
 6. Run trend analysis and only surface picks with real odds + positive edge
-7. Deliver alerts via Discord bot
+7. Record qualifying picks to DB (Discord alert delivery handled by discord_bot.py)
 """
 
 from __future__ import annotations
@@ -980,10 +980,22 @@ class EsporfBot:
 
         display_reports_by_league(reports)
 
-        # Alert delivery is handled by the Discord bot (discord_bot.py).
-        # The scan loop just returns reports_with_picks; the bot's
-        # _send_alerts() method handles dedup, delivery, and pick recording.
+        # Record new picks. Uses content-based _match_key (players +
+        # start_time) instead of match_id, which can change between scans
+        # when BetsAPI cross-references an ace_/esb_ match with a different
+        # numeric ID.  Discord alert delivery is handled by the Discord bot
+        # layer (discord_bot.py); this loop only persists picks to the DB.
         alerted_count = 0
+        new_reports = [
+            r for r in reports_with_picks
+            if _match_key(r.match) not in self._alerted_keys
+        ]
+        if new_reports:
+            new_reports.sort(key=lambda r: r.match.start_time)
+            for r in new_reports:
+                self._alerted_keys.add(_match_key(r.match))
+                self.record_pick(r)
+            alerted_count = len(new_reports)
 
         # Log scan metadata
         self.db.log_scan(

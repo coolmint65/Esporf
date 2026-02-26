@@ -18,8 +18,8 @@ Endpoint:
 
 Groups:
     2000124075 = All eSoccer (parent)
-    2000124080 = Esports Battle (2x4min) — maps to GG League 8min (37298)
-    2010205703 = eSports Battle (2x6min) — maps to GT Leagues 12min (23114)
+    2000124080 = Esports Battle (2x4min) — maps to GG League 8min (42648)
+    2010205703 = eSports Battle (2x6min) — maps to GT Leagues 12min (42649)
 """
 
 from __future__ import annotations

@@ -35,10 +35,10 @@ class Settings(BaseSettings):
     # Used as fallback when real odds aren't available
     volta_book_lines: str = "2.5,3.5,4.5"
 
-    # Discord bot alerts
-    discord_role_id: str = ""  # Role ID to mention in alerts (e.g. "eSoccer" role)
+    # Discord bot
     discord_bot_token: str = ""
     discord_channel_id: str = ""  # Channel ID where bot sends alerts
+    discord_role_id: str = ""  # Role ID to mention in alerts (e.g. "eSoccer" role)
 
     # Data persistence
     data_dir: str = "data"
