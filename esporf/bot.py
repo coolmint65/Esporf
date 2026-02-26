@@ -518,7 +518,7 @@ class EsporfBot:
         except Exception as e:
             logger.warning("AceOdds schedule failed: %s", e)
 
-        # 2. Near-term: ESportsBattle (~30 min lookahead, confirms timing)
+        # 2. Near-term: ESportsBattle (~30 min from nearest-matches)
         try:
             esb_matches = await self.esb.get_volta_schedule()
             for m in esb_matches:
@@ -530,6 +530,19 @@ class EsporfBot:
                     all_upcoming.append(m)
         except Exception as e:
             logger.warning("ESportsBattle schedule failed: %s", e)
+
+        # 2.1. ESportsBattle deep schedule (full-day Volta via tournament endpoints)
+        try:
+            deep_matches = await self.esb.get_volta_deep_schedule()
+            for m in deep_matches:
+                key = _match_key(m)
+                volta_confirmed.add(key)
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    key_to_idx[key] = len(all_upcoming)
+                    all_upcoming.append(m)
+        except Exception as e:
+            logger.warning("ESportsBattle deep schedule failed: %s", e)
 
         # 2.5. HUDstats: GG League schedule (30+ min lookahead, way ahead of BetsAPI)
         try:
