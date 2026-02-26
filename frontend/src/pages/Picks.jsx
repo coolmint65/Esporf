@@ -5,17 +5,7 @@ import Card from '../components/Card'
 import Badge from '../components/Badge'
 import { Table, Th, Td } from '../components/Table'
 import { Loading, Empty, ErrorMsg } from '../components/Empty'
-
-function Kickoff({ startTime }) {
-  const now = Math.floor(Date.now() / 1000)
-  const diff = startTime - now
-  if (diff <= 0) return <span className="text-win text-xs font-medium">LIVE</span>
-  const mins = Math.floor(diff / 60)
-  if (mins < 60) return <span className="text-xs text-muted">{mins}m</span>
-  const hrs = Math.floor(mins / 60)
-  const rem = mins % 60
-  return <span className="text-xs text-muted">{hrs}h{rem > 0 ? ` ${rem}m` : ''}</span>
-}
+import Kickoff from '../components/Kickoff'
 
 export default function Picks() {
   const [result, setResult] = useState('')
