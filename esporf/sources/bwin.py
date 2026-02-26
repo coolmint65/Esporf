@@ -170,6 +170,12 @@ class BwinClient:
     async def _fetch_volta_fixtures(self) -> list[_BwinFixture]:
         """Fetch all Volta fixtures with odds from bwin CDS API.
 
+        Strategy: fetch ALL eSoccer fixtures (sport 108), then filter for
+        competitions whose name contains "volta".  This auto-discovers new
+        Volta tournaments as bwin rotates them without needing code changes.
+
+        Falls back to the known competition ID list if the full fetch fails.
+
         Results are cached for _CACHE_TTL seconds.
         """
         now = time.time()
@@ -181,14 +187,14 @@ class BwinClient:
         # Refresh access ID periodically (it can rotate)
         await self._refresh_access_id(client)
 
-        comp_ids = ",".join(str(c) for c in _VOLTA_COMPETITION_IDS)
         url = f"{_CDS_BASE}/bettingoffer/fixtures"
+
+        # First try: fetch ALL eSoccer fixtures and filter for Volta
         params = {
             "x-bwin-accessid": self._access_id,
             "lang": "en",
             "country": "GB",
             "sportIds": str(_SPORT_ID),
-            "competitionIds": comp_ids,
             "offerMapping": "Filtered",
             "offerCategories": "Gridable",
             "fixtureCategories": "Gridable",
@@ -199,10 +205,26 @@ class BwinClient:
             resp.raise_for_status()
             data = resp.json()
         except Exception as e:
-            logger.warning("bwin: Volta fixtures fetch failed: %s", e)
-            return self._cache  # return stale cache on error
+            logger.warning("bwin: full eSoccer fetch failed, trying known IDs: %s", e)
+            # Fallback: fetch only known Volta competition IDs
+            data = await self._fetch_by_competition_ids(client)
 
-        fixtures = _parse_fixtures(data)
+        all_fixtures = _parse_fixtures(data)
+
+        # Filter to only Volta competitions (name contains "volta")
+        fixtures = [
+            f for f in all_fixtures
+            if "volta" in f.competition.lower()
+        ]
+
+        # If no volta fixtures found in the full fetch, try known IDs directly
+        if not fixtures and all_fixtures:
+            logger.debug(
+                "bwin: no 'volta' competitions in %d fixtures, trying known IDs",
+                len(all_fixtures),
+            )
+            data = await self._fetch_by_competition_ids(client)
+            fixtures = _parse_fixtures(data)
         self._cache = fixtures
         self._cache_time = now
 
@@ -216,6 +238,28 @@ class BwinClient:
             logger.debug("bwin: no Volta fixtures returned")
 
         return fixtures
+
+    async def _fetch_by_competition_ids(self, client: httpx.AsyncClient) -> dict:
+        """Fallback: fetch only the known Volta competition IDs."""
+        comp_ids = ",".join(str(c) for c in _VOLTA_COMPETITION_IDS)
+        url = f"{_CDS_BASE}/bettingoffer/fixtures"
+        params = {
+            "x-bwin-accessid": self._access_id,
+            "lang": "en",
+            "country": "GB",
+            "sportIds": str(_SPORT_ID),
+            "competitionIds": comp_ids,
+            "offerMapping": "Filtered",
+            "offerCategories": "Gridable",
+            "fixtureCategories": "Gridable",
+        }
+        try:
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logger.warning("bwin: fallback fetch failed: %s", e)
+            return {}
 
     async def _refresh_access_id(self, client: httpx.AsyncClient) -> None:
         """Refresh the public access ID from bwin's client config.

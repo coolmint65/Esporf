@@ -530,6 +530,8 @@ class EsporfBot:
             logger.warning("ESportsBattle schedule failed: %s", e)
 
         # 2.5. bwin: Volta schedule + odds (has pre-match odds well before kickoff)
+        # bwin returns matches WITH odds pre-attached. If AceOdds/ESportsBattle
+        # already added the same match (without odds), merge the odds in.
         try:
             bwin_matches = await self.bwin.get_volta_schedule()
             for m in bwin_matches:
@@ -539,6 +541,14 @@ class EsporfBot:
                     seen_keys.add(key)
                     key_to_idx[key] = len(all_upcoming)
                     all_upcoming.append(m)
+                elif key in key_to_idx and m.odds and m.odds.has_data:
+                    # Match already exists from AceOdds/ESB — transfer bwin odds
+                    existing = all_upcoming[key_to_idx[key]]
+                    if not (existing.odds and existing.odds.has_data):
+                        existing.odds = m.odds
+                        logger.info(
+                            "Merged bwin odds into %s", existing.display_name,
+                        )
         except Exception as e:
             logger.warning("bwin Volta schedule failed: %s", e)
 
