@@ -661,17 +661,15 @@ class BetPick:
 
     @property
     def is_heavy_juice(self) -> bool:
-        """True if odds are -200 or worse (heavy favorite, low payout)."""
+        """True if odds are -150 or worse (heavy favorite, low payout)."""
         dec = self.decimal_odds
-        return dec is not None and dec < 1.50
+        return dec is not None and dec < 1.667
 
     @property
     def units(self) -> float:
         """Recommended unit size derived directly from confidence score.
 
         Sharp tiers — big units only on the highest-conviction plays.
-        Heavy juice (odds worse than -200) caps sizing at 1.5u regardless
-        of confidence, since the payout doesn't justify the exposure.
         """
         c = self.confidence
 
@@ -683,10 +681,6 @@ class BetPick:
             u = 1.5
         else:
             u = 1.0
-
-        # Heavy juice cap — don't overexpose on bad payout
-        if self.is_heavy_juice:
-            u = min(u, 1.5)
 
         return u
 
@@ -753,9 +747,10 @@ class MatchupReport:
         a -240 line with 10% edge.
 
         Minimum 5% edge required — smaller edges get eaten by vig/variance.
-        Heavy juice (> -200) is penalized in scoring since the payout is poor.
+        Max juice is -150 (decimal 1.667) — anything worse is rejected.
         """
         MIN_EDGE = 0.05  # 5% minimum edge to recommend
+        MAX_JUICE_ODDS = 1.667  # -150 American; reject anything below
 
         best_market: str | None = None
         best_score = 0.0
@@ -787,6 +782,9 @@ class MatchupReport:
                     implied = odds_line.under_implied
                     dec_odds = odds_line.under_odds
 
+                if dec_odds < MAX_JUICE_ODDS:
+                    continue  # juice worse than -150 — payout too low
+
                 edge = avg_rate - implied
                 if edge < MIN_EDGE:
                     continue  # not enough edge to overcome vig/variance
@@ -800,19 +798,11 @@ class MatchupReport:
                 ev_norm = min(max(ev_per_unit, 0.0) / 0.50, 1.0)
                 edge_norm = min(edge / 0.30, 1.0)
 
-                # Penalize heavy juice — even with edge, payout is poor
-                juice_penalty = 0.0
-                if dec_odds < 1.50:  # worse than -200
-                    juice_penalty = 0.15
-                elif dec_odds < 1.67:  # worse than -150
-                    juice_penalty = 0.05
-
                 score = (
                     ev_norm * 0.35
                     + edge_norm * 0.25
                     + min(agreement / 5, 1.0) * 0.20
                     + avg_rate * 0.20
-                    - juice_penalty
                 )
                 if score > best_score:
                     best_score = score
@@ -844,6 +834,9 @@ class MatchupReport:
                     implied = spread.away_implied
                     dec_odds = spread.away_odds
 
+                if dec_odds < MAX_JUICE_ODDS:
+                    continue  # juice worse than -150
+
                 edge = avg_rate - implied
                 if edge < MIN_EDGE:
                     continue
@@ -854,18 +847,11 @@ class MatchupReport:
                 ev_norm = min(max(ev_per_unit, 0.0) / 0.50, 1.0)
                 edge_norm = min(edge / 0.30, 1.0)
 
-                juice_penalty = 0.0
-                if dec_odds < 1.50:
-                    juice_penalty = 0.15
-                elif dec_odds < 1.67:
-                    juice_penalty = 0.05
-
                 score = (
                     ev_norm * 0.35
                     + edge_norm * 0.25
                     + min(agreement / 5, 1.0) * 0.20
                     + avg_rate * 0.20
-                    - juice_penalty
                 )
                 if score > best_score:
                     best_score = score
@@ -886,6 +872,9 @@ class MatchupReport:
                 implied = _get_moneyline_implied(market, ml, self.match)
                 if implied is None:
                     continue
+                ml_dec = _get_moneyline_dec_odds(market, ml, self.match)
+                if ml_dec is not None and ml_dec < MAX_JUICE_ODDS:
+                    continue  # juice worse than -150
                 edge = avg_rate - implied
                 if edge < MIN_EDGE:
                     continue
@@ -1066,6 +1055,25 @@ def _get_moneyline_implied(
                 return implied
         # If we can't match the player, skip
         return None
+    return None
+
+
+def _get_moneyline_dec_odds(
+    market: str, ml: MoneylineOdds, match: UpcomingMatch
+) -> float | None:
+    """Get the decimal odds for a moneyline market."""
+    market_lower = market.lower()
+    if "draw" in market_lower:
+        return ml.draw_odds
+    if "win" in market_lower:
+        for player, dec in [
+            (match.home, ml.home_odds),
+            (match.away, ml.away_odds),
+        ]:
+            if extract_handle(player).lower() in market_lower:
+                return dec
+            if player.lower() in market_lower:
+                return dec
     return None
 
 
