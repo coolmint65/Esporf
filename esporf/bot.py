@@ -768,8 +768,8 @@ class EsporfBot:
         except Exception as e:
             logger.warning("kambi odds fetch failed: %s", e)
 
-        # bwin fills Volta gaps — bwin has Volta odds available well before
-        # kickoff, solving the timing problem BetsAPI has with Volta.
+        # bwin provides odds for its own Volta tournaments (different player
+        # pool from bet365).  attach_odds handles any cross-matches.
         bwin_attached = 0
         try:
             bwin_attached = await self.bwin.attach_odds(all_upcoming)
@@ -782,6 +782,95 @@ class EsporfBot:
             fanduel_attached = await self.fanduel.attach_odds(all_upcoming)
         except Exception as e:
             logger.warning("fanduel odds fetch failed: %s", e)
+
+        # ── Volta BetsAPI polling ─────────────────────────────────
+        # bet365's Volta odds (via BetsAPI) only appear ~2 min before
+        # kickoff.  bwin has DIFFERENT Volta players, so it can't fill
+        # this gap.  For Volta matches starting within ~8 min that still
+        # lack odds, aggressively poll BetsAPI to catch them ASAP.
+        _VOLTA_LID = 38439
+        _VOLTA_RETRY_INTERVAL = 45   # seconds between retries
+        _VOLTA_MAX_RETRIES = 4       # max polls (~3 min total)
+        _VOLTA_WINDOW = 480          # only retry matches starting within 8 min
+
+        now = time.time()
+        volta_no_odds = [
+            m for m in all_upcoming
+            if m.league_id == _VOLTA_LID
+            and not (m.odds and m.odds.has_data)
+            and 0 < (m.start_time - now) <= _VOLTA_WINDOW
+        ]
+        if volta_no_odds and self._running:
+            console.print(
+                f"  [dim]{len(volta_no_odds)} Volta match(es) within "
+                f"{_VOLTA_WINDOW // 60}min missing odds — polling BetsAPI "
+                f"(up to {_VOLTA_MAX_RETRIES}x every {_VOLTA_RETRY_INTERVAL}s)...[/dim]"
+            )
+
+            for attempt in range(1, _VOLTA_MAX_RETRIES + 1):
+                if not self._running:
+                    break
+
+                await asyncio.sleep(_VOLTA_RETRY_INTERVAL)
+
+                # Fetch fresh in-play + upcoming from BetsAPI
+                try:
+                    fresh: list[UpcomingMatch] = []
+                    fresh.extend(await self.api.get_inplay_matches(_VOLTA_LID))
+                    fresh.extend(await self.api.get_upcoming_matches(_VOLTA_LID))
+                except Exception as e:
+                    logger.warning("Volta poll %d/%d failed: %s", attempt, _VOLTA_MAX_RETRIES, e)
+                    continue
+
+                # Build lookup by player pair for cross-referencing
+                fresh_lookup: dict[tuple[str, str], list[UpcomingMatch]] = {}
+                for fm in fresh:
+                    h = extract_handle(fm.home).lower()
+                    a = extract_handle(fm.away).lower()
+                    pair = tuple(sorted([h, a]))
+                    fresh_lookup.setdefault(pair, []).append(fm)
+
+                # Resolve ace_/esb_ IDs to BetsAPI numeric IDs
+                still_missing = [
+                    m for m in volta_no_odds
+                    if not (m.odds and m.odds.has_data)
+                ]
+                if not still_missing:
+                    break
+
+                resolved = 0
+                for m in still_missing:
+                    if m.match_id.startswith(("esb_", "ace_")):
+                        h = extract_handle(m.home).lower()
+                        a = extract_handle(m.away).lower()
+                        pair = tuple(sorted([h, a]))
+                        for candidate in fresh_lookup.get(pair, []):
+                            if abs(candidate.start_time - m.start_time) <= 300:
+                                m.match_id = candidate.match_id
+                                resolved += 1
+                                break
+
+                # Fetch odds for matches with numeric BetsAPI IDs
+                retry_targets = [
+                    m for m in still_missing
+                    if not m.match_id.startswith(("esb_", "ace_", "kambi_", "bwin_"))
+                    and not (m.odds and m.odds.has_data)
+                ]
+                if retry_targets:
+                    await self.api.fetch_odds_batch(
+                        retry_targets, skip_bet365_prematch=True,
+                    )
+
+                got = sum(1 for m in volta_no_odds if m.odds and m.odds.has_data)
+                remaining = len(volta_no_odds) - got
+                if got:
+                    console.print(
+                        f"  [dim]Volta poll {attempt}/{_VOLTA_MAX_RETRIES}: "
+                        f"got odds for {got}/{len(volta_no_odds)} "
+                        f"(resolved {resolved} ID(s))[/dim]"
+                    )
+                if remaining == 0:
+                    break
 
         # Report odds coverage
         odds_count = sum(1 for m in all_upcoming if m.odds and m.odds.has_data)
