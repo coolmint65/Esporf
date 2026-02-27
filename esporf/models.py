@@ -750,10 +750,11 @@ class MatchupReport:
         not just edge. A +130 line with 20% edge is far more valuable than
         a -240 line with 10% edge.
 
-        Minimum 5% edge required — smaller edges get eaten by vig/variance.
+        Minimum 8% edge required — smaller edges get eaten by vig/variance.
+        At least 2 trends must agree on a market to recommend it.
         Max juice is -150 (decimal 1.667) — anything worse is rejected.
         """
-        MIN_EDGE = 0.05  # 5% minimum edge to recommend
+        MIN_EDGE = 0.08  # 8% minimum edge to recommend
         MAX_JUICE_ODDS = 1.667  # -150 American; reject anything below
 
         best_market: str | None = None
@@ -770,6 +771,8 @@ class MatchupReport:
             parsed = _parse_line(market)
             parsed_spread = _parse_spread(market)
             agreement = len(trends)
+            if agreement < 2:
+                continue  # need at least 2 trends backing a pick
             avg_rate = sum(t.hit_rate for t in trends) / agreement
             avg_sample = sum(t.sample_size for t in trends) / agreement
 

@@ -16,6 +16,8 @@ async function fetchApi(path, params = {}) {
 export const api = {
   health:       ()            => fetchApi('/'),
   stats:        (params = {}) => fetchApi('/stats', params),
+  dailyStats:   ()            => fetchApi('/stats/daily'),
+  statsChart:   (params = {}) => fetchApi('/stats/chart', params),
   breakdown:    ()            => fetchApi('/stats/breakdown'),
   livePicks:    ()            => fetchApi('/picks/live'),
   pickHistory:  (params = {}) => fetchApi('/picks/history', params),

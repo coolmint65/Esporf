@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     schedule_lookahead: int = 1800  # seconds (30 min) — how far ahead to show/alert matches
 
     # Trend detection thresholds
-    min_hit_rate: float = 0.70  # 70% minimum hit rate to surface a trend
-    min_sample_size: int = 10  # minimum matches needed to consider a trend valid
+    min_hit_rate: float = 0.75  # 75% minimum hit rate to surface a trend
+    min_sample_size: int = 12  # minimum matches needed to consider a trend valid
     last_n_matches: int = 20  # how many recent matches to analyze per player/H2H
 
     # Over/under goal lines to check

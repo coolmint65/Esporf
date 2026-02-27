@@ -7,7 +7,7 @@ Interactive docs available at /docs (Swagger UI).
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -548,6 +548,97 @@ def get_stats_breakdown():
         db.close()
 
 
+class DailyStatsResponse(BaseModel):
+    today: StatsResponse
+    all_time: StatsResponse
+
+
+class DailyProfitPoint(BaseModel):
+    date: str  # YYYY-MM-DD
+    profit: float  # daily P&L
+    cumulative: float  # running total
+    picks: int  # picks decided that day
+
+
+@app.get("/api/stats/daily", response_model=DailyStatsResponse)
+def get_daily_stats():
+    """Today's record/profit alongside all-time stats."""
+    db = _get_db()
+    try:
+        # Today's boundary in display timezone
+        display_tz = ZoneInfo(settings.timezone)
+        now_local = datetime.now(display_tz)
+        today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_unix = int(today_start.timestamp())
+
+        today_summary = db.get_pick_summary(since=today_unix)
+        all_summary = db.get_pick_summary()
+
+        today_stats = _build_stats(today_summary)
+        all_stats = _build_stats(all_summary)
+
+        # Add match-level data to all_time
+        conn = db._get_conn()
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt, AVG(home_score + away_score) as avg_goals FROM matches"
+        ).fetchone()
+        players_row = conn.execute(
+            "SELECT COUNT(DISTINCT handle) as cnt FROM player_form"
+        ).fetchone()
+        all_stats.total_matches = row["cnt"]
+        all_stats.total_players = players_row["cnt"]
+        all_stats.avg_total_goals = round(row["avg_goals"], 1) if row["avg_goals"] else None
+        all_stats.avg_total_goals_display = f"{row['avg_goals']:.1f}" if row["avg_goals"] else "--"
+
+        return DailyStatsResponse(today=today_stats, all_time=all_stats)
+    finally:
+        db.close()
+
+
+@app.get("/api/stats/chart", response_model=list[DailyProfitPoint])
+def get_stats_chart(
+    days: int = Query(7, ge=1, le=90, description="Number of days to chart"),
+):
+    """Daily profit/loss for charting — one data point per day."""
+    db = _get_db()
+    try:
+        display_tz = ZoneInfo(settings.timezone)
+        all_picks = db.get_all_picks(limit=50000)
+        # Bucket resolved picks by date
+        daily: dict[str, dict] = {}
+        for p in all_picks:
+            if p.result == PickResult.PENDING:
+                continue
+            dt = datetime.fromtimestamp(p.created_at, tz=display_tz)
+            date_key = dt.strftime("%Y-%m-%d")
+            if date_key not in daily:
+                daily[date_key] = {"profit": 0.0, "picks": 0}
+            daily[date_key]["profit"] += p.profit
+            daily[date_key]["picks"] += 1
+
+        # Build sorted list for last N days
+        now_local = datetime.now(display_tz)
+        result = []
+        cumulative = 0.0
+        # Get all dates sorted, filter to window
+        cutoff_date = (now_local - timedelta(days=days)).strftime("%Y-%m-%d")
+        for date_key in sorted(daily.keys()):
+            if date_key < cutoff_date:
+                cumulative += daily[date_key]["profit"]
+                continue
+            day_profit = round(daily[date_key]["profit"], 2)
+            cumulative += day_profit
+            result.append(DailyProfitPoint(
+                date=date_key,
+                profit=day_profit,
+                cumulative=round(cumulative, 2),
+                picks=daily[date_key]["picks"],
+            ))
+        return result
+    finally:
+        db.close()
+
+
 def _classify_market(market: str) -> str:
     """Bucket a market name into a high-level category."""
     ml = market.lower()
@@ -960,11 +1051,15 @@ def get_schedule(
             date_groups.setdefault(date_key, []).append(entry)
 
         # Upcoming / live matches from the latest scan
+        # Only show upcoming within the next 2 hours to avoid clutter
         completed_ids = {m.match_id for m in matches}
         upcoming_rows = db.get_upcoming(league_id)
+        max_upcoming_time = int(time.time()) + 7200  # 2 hours from now
         for row in upcoming_rows:
             if row["match_id"] in completed_ids:
                 continue
+            if not row["is_live"] and row["start_time"] > max_upcoming_time:
+                continue  # too far in the future
             dt = datetime.fromtimestamp(row["start_time"], tz=display_tz)
             date_key = dt.strftime("%Y-%m-%d")
             is_live = bool(row["is_live"])

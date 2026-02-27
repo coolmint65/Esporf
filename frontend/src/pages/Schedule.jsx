@@ -28,6 +28,43 @@ const TREND_COLORS = {
   insufficient: 'text-muted',
 }
 
+function classifyPick(market) {
+  const m = market.toLowerCase()
+  if (m.includes('over')) return 'over'
+  if (m.includes('under')) return 'under'
+  return 'split' // ML, spread, draw
+}
+
+function BestBetCard({ label, pick, accentColor }) {
+  if (!pick) {
+    return (
+      <div className="bg-surface border border-border rounded-xl p-5 flex flex-col items-center justify-center min-h-[120px]">
+        <div className="text-xs uppercase tracking-wider text-muted mb-1">{label}</div>
+        <div className="text-sm text-muted">No picks</div>
+      </div>
+    )
+  }
+
+  const profitColor = pick.profit >= 0 ? 'text-win' : 'text-loss'
+
+  return (
+    <div className={`bg-surface border border-border rounded-xl p-5 relative overflow-hidden`}>
+      <div className={`absolute top-0 left-0 w-1 h-full ${accentColor}`} />
+      <div className="text-xs uppercase tracking-wider text-muted mb-2">{label}</div>
+      <div className="text-sm font-bold mb-1">{pick.market}</div>
+      <div className="text-xs text-muted mb-2">
+        {pick.home} vs {pick.away}
+      </div>
+      <div className="flex items-center gap-3 text-xs">
+        <span className="font-semibold">{pick.units}u</span>
+        <span>{pick.odds_american || '--'}</span>
+        {pick.edge_pct && <span className="text-win">{pick.edge_pct} edge</span>}
+        <span className="text-muted">{pick.hit_rate_pct} HR</span>
+      </div>
+    </div>
+  )
+}
+
 function PlayerStat({ stats, side }) {
   if (!stats) return <div className="text-xs text-muted">No data</div>
 
@@ -137,11 +174,26 @@ export default function Schedule() {
     refetchInterval: 30_000,
   })
 
+  const { data: livePicks } = useQuery({
+    queryKey: ['livePicks'],
+    queryFn: api.livePicks,
+    refetchInterval: 30_000,
+  })
+
   const handleMatchClick = (matchId) => {
     navigate(`/schedule/${encodeURIComponent(matchId)}`)
   }
 
   const totalMatches = schedule?.reduce((sum, g) => sum + g.total, 0) ?? 0
+
+  // Derive best bets by category from live picks
+  const bestOver = livePicks?.filter(p => classifyPick(p.market) === 'over')
+    .sort((a, b) => (b.edge ?? 0) - (a.edge ?? 0))[0] ?? null
+  const bestUnder = livePicks?.filter(p => classifyPick(p.market) === 'under')
+    .sort((a, b) => (b.edge ?? 0) - (a.edge ?? 0))[0] ?? null
+  const bestSplit = livePicks?.filter(p => classifyPick(p.market) === 'split')
+    .sort((a, b) => (b.edge ?? 0) - (a.edge ?? 0))[0] ?? null
+  const hasBestBets = bestOver || bestUnder || bestSplit
 
   return (
     <div className="space-y-6">
@@ -151,6 +203,18 @@ export default function Schedule() {
           Match schedule with player stats {totalMatches > 0 && `\u2014 ${totalMatches} matches`}
         </p>
       </div>
+
+      {/* Best Bets Cards */}
+      {hasBestBets && (
+        <div>
+          <h2 className="text-sm font-semibold text-muted uppercase tracking-wider mb-3">Best Bets</h2>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <BestBetCard label="Best Over Bet" pick={bestOver} accentColor="bg-win" />
+            <BestBetCard label="Best Under Bet" pick={bestUnder} accentColor="bg-accent" />
+            <BestBetCard label="Best ML / Spread" pick={bestSplit} accentColor="bg-purple" />
+          </div>
+        </div>
+      )}
 
       {/* Filters */}
       <div className="flex flex-wrap items-center gap-4">
