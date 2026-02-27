@@ -81,8 +81,9 @@ export default function MatchDetail() {
   const { match, home_form, away_form, h2h, picks, recommendation } = data
   const homeHandle = home_form?.handle || match.home
   const awayHandle = away_form?.handle || match.away
-  const homeWon = match.home_score > match.away_score
-  const awayWon = match.away_score > match.home_score
+  const isUpcoming = match.score === 'vs'
+  const homeWon = !isUpcoming && match.home_score > match.away_score
+  const awayWon = !isUpcoming && match.away_score > match.home_score
 
   return (
     <div className="space-y-6">
@@ -114,12 +115,21 @@ export default function MatchDetail() {
 
           {/* Score */}
           <div className="text-center px-6">
-            <div className="text-4xl font-black tracking-widest">
-              <span className={homeWon ? 'text-win' : ''}>{match.home_score}</span>
-              <span className="text-muted mx-2">-</span>
-              <span className={awayWon ? 'text-win' : ''}>{match.away_score}</span>
-            </div>
-            <div className="text-xs text-muted mt-1">{match.total_goals} total goals</div>
+            {isUpcoming ? (
+              <>
+                <div className="text-4xl font-black tracking-widest text-muted">vs</div>
+                <div className="text-xs text-accent mt-1">Upcoming</div>
+              </>
+            ) : (
+              <>
+                <div className="text-4xl font-black tracking-widest">
+                  <span className={homeWon ? 'text-win' : ''}>{match.home_score}</span>
+                  <span className="text-muted mx-2">-</span>
+                  <span className={awayWon ? 'text-win' : ''}>{match.away_score}</span>
+                </div>
+                <div className="text-xs text-muted mt-1">{match.total_goals} total goals</div>
+              </>
+            )}
           </div>
 
           {/* Away */}

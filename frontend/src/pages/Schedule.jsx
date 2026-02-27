@@ -46,6 +46,9 @@ function BestBetCard({ label, pick, accentColor }) {
   }
 
   const profitColor = pick.profit >= 0 ? 'text-win' : 'text-loss'
+  const startTime = pick.start_time
+    ? new Date(pick.start_time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : null
 
   return (
     <div className={`bg-surface border border-border rounded-xl p-5 relative overflow-hidden`}>
@@ -54,6 +57,7 @@ function BestBetCard({ label, pick, accentColor }) {
       <div className="text-sm font-bold mb-1">{pick.market}</div>
       <div className="text-xs text-muted mb-2">
         {pick.home} vs {pick.away}
+        {startTime && <span className="ml-2 text-accent">{startTime}</span>}
       </div>
       <div className="flex items-center gap-3 text-xs">
         <span className="font-semibold">{pick.units}u</span>
@@ -171,7 +175,7 @@ export default function Schedule() {
   const { data: schedule, isLoading, error } = useQuery({
     queryKey: ['schedule', params],
     queryFn: () => api.schedule(params),
-    refetchInterval: 30_000,
+    refetchInterval: 10_000,
   })
 
   const { data: livePicks } = useQuery({

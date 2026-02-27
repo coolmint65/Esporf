@@ -1084,9 +1084,17 @@ def get_schedule(
             )
             date_groups.setdefault(date_key, []).append(entry)
 
+        # Sort: live first, then upcoming (soonest first), then completed (soonest first)
+        def _match_sort_key(m: ScheduleMatchResponse):
+            if m.status == "live":
+                return (0, m.start_time)
+            if m.status == "upcoming":
+                return (1, m.start_time)
+            return (2, m.start_time)
+
         result = []
         for date_key in sorted(date_groups.keys(), reverse=True):
-            group = sorted(date_groups[date_key], key=lambda x: x.start_time, reverse=True)
+            group = sorted(date_groups[date_key], key=_match_sort_key)
             result.append(ScheduleResponse(
                 date=date_key,
                 matches=group,
@@ -1104,30 +1112,55 @@ def get_match_detail(match_id: str):
     try:
         conn = db._get_conn()
 
-        # 1. Get the match
+        # 1. Get the match (check completed matches first, then upcoming)
         row = conn.execute(
             "SELECT * FROM matches WHERE match_id = ?", (match_id,)
         ).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail=f"Match '{match_id}' not found")
-        m = db._row_to_match(row)
-        match_resp = _match_to_response(m)
+        is_upcoming = False
+        if row:
+            m = db._row_to_match(row)
+            match_resp = _match_to_response(m)
+        else:
+            # Try upcoming_matches table for live/upcoming matches
+            urow = conn.execute(
+                "SELECT * FROM upcoming_matches WHERE match_id = ?", (match_id,)
+            ).fetchone()
+            if not urow:
+                raise HTTPException(status_code=404, detail=f"Match '{match_id}' not found")
+            is_upcoming = True
+            match_resp = MatchResponse(
+                match_id=urow["match_id"],
+                league=league_display_name(urow["league_id"]),
+                league_id=urow["league_id"],
+                home=urow["home"],
+                away=urow["away"],
+                home_score=0,
+                away_score=0,
+                total_goals=0,
+                score="vs",
+                winner=None,
+                start_time=urow["start_time"],
+                start_time_fmt=_fmt_time(urow["start_time"]),
+            )
 
         # 2. Player forms
-        home_handle = extract_handle(m.home)
-        away_handle = extract_handle(m.away)
-        home_form_data = db.get_player_form(home_handle, league_id=m.league_id)
-        away_form_data = db.get_player_form(away_handle, league_id=m.league_id)
+        home_name = match_resp.home
+        away_name = match_resp.away
+        league_id_val = match_resp.league_id
+        home_handle = extract_handle(home_name)
+        away_handle = extract_handle(away_name)
+        home_form_data = db.get_player_form(home_handle, league_id=league_id_val)
+        away_form_data = db.get_player_form(away_handle, league_id=league_id_val)
 
         home_resp = _form_to_response(home_form_data) if home_form_data else None
         away_resp = _form_to_response(away_form_data) if away_form_data else None
 
         # 3. H2H
-        h2h_matches = db.get_h2h_matches(m.home, m.away, limit=20)
+        h2h_matches = db.get_h2h_matches(home_name, away_name, limit=20)
         h2h_data = None
         if h2h_matches:
-            a_wins = sum(1 for x in h2h_matches if x.won_by(m.home))
-            b_wins = sum(1 for x in h2h_matches if x.won_by(m.away))
+            a_wins = sum(1 for x in h2h_matches if x.won_by(home_name))
+            b_wins = sum(1 for x in h2h_matches if x.won_by(away_name))
             draws = sum(1 for x in h2h_matches if x.is_draw)
             total_goals = sum(x.total_goals for x in h2h_matches)
             n = len(h2h_matches)
@@ -1229,13 +1262,13 @@ def get_match_detail(match_id: str):
 
                 if hw / total_h2h >= 0.60 and home_wr >= 0.40:
                     ml_rec = {
-                        "side": extract_handle(m.home),
+                        "side": home_handle,
                         "h2h_rate_pct": f"{hw / total_h2h:.0%}",
                         "recent_form_pct": f"{home_wr:.0%}",
                     }
                 elif aw / total_h2h >= 0.60 and away_wr >= 0.40:
                     ml_rec = {
-                        "side": extract_handle(m.away),
+                        "side": away_handle,
                         "h2h_rate_pct": f"{aw / total_h2h:.0%}",
                         "recent_form_pct": f"{away_wr:.0%}",
                     }
