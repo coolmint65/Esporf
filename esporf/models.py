@@ -480,7 +480,7 @@ class PlayerTier(Enum):
     @property
     def base_modifier(self) -> float:
         return {
-            PlayerTier.ELITE: 1.15,
+            PlayerTier.ELITE: 1.08,
             PlayerTier.SOLID: 1.00,
             PlayerTier.WATCHLIST: 0.85,
             PlayerTier.BLOCKED: 0.00,
@@ -585,9 +585,9 @@ class BetPick:
 
     @property
     def confidence_label(self) -> str:
-        if self.confidence >= 0.90:
+        if self.confidence >= 0.93:
             return "Very High"
-        if self.confidence >= 0.80:
+        if self.confidence >= 0.85:
             return "High"
         if self.confidence >= 0.75:
             return "Moderate"
@@ -668,22 +668,31 @@ class BetPick:
 
     @property
     def units(self) -> float:
-        """Recommended unit size derived directly from confidence score.
+        """Recommended unit size — high units are reserved for true hammers.
 
-        Sharp tiers — big units only on the highest-conviction plays.
+        Beyond the composite confidence score, 2u and 3u plays must also
+        pass hard gates on edge, trend agreement, and hit rate.  This
+        prevents a single strong signal from inflating unit size.
         """
         c = self.confidence
+        n_trends = len(self.supporting_trends)
+        avg_rate = (
+            sum(t.hit_rate for t in self.supporting_trends) / n_trends
+            if n_trends
+            else 0.0
+        )
+        edge = self.edge or 0.0
 
-        if c >= 0.90:
-            u = 3.0
-        elif c >= 0.80:
-            u = 2.0
-        elif c >= 0.75:
-            u = 1.5
-        else:
-            u = 1.0
+        # 3u — the ultimate hammer: everything must line up
+        if c >= 0.93 and edge >= 0.15 and n_trends >= 4 and avg_rate >= 0.80:
+            return 3.0
 
-        return u
+        # 2u — strong conviction: high score AND solid underlying data
+        if c >= 0.85 and edge >= 0.12 and n_trends >= 3 and avg_rate >= 0.78:
+            return 2.0
+
+        # Everything else is 1u — still a recommended play, just standard size
+        return 1.0
 
     @property
     def units_display(self) -> str:
