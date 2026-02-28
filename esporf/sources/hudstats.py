@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime
 
 import httpx
@@ -43,6 +44,19 @@ _GG_LEAGUE_ID = 42648
 _SCHEDULE_CACHE_TTL = 45
 
 
+@dataclass
+class LiveScore:
+    """Snapshot of a live GG League match with current scores."""
+
+    match_id: str
+    home: str
+    away: str
+    home_score: int
+    away_score: int
+    start_time: int
+    league_id: int = _GG_LEAGUE_ID
+
+
 class HUDstatsClient:
     """Async client for the HUDstats / H2HGGL eSoccer API."""
 
@@ -50,6 +64,9 @@ class HUDstatsClient:
         self._client: httpx.AsyncClient | None = None
         self._cache: list[UpcomingMatch] = []
         self._cache_time: float = 0
+        # Current live match scores — populated each get_schedule() call.
+        # Used by the bot to detect when matches finish and capture results.
+        self.live_scores: dict[str, LiveScore] = {}
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -109,12 +126,19 @@ class HUDstatsClient:
             resp = await client.get(f"{_API_BASE}/v1/live/{_SPORT}")
             resp.raise_for_status()
             live = resp.json()
+            current_live: dict[str, LiveScore] = {}
             if isinstance(live, list):
                 seen_ids = {m.match_id for m in matches}
                 for m in live:
                     parsed = _parse_match(m, is_live=True)
-                    if parsed and parsed.match_id not in seen_ids:
-                        matches.append(parsed)
+                    if parsed:
+                        if parsed.match_id not in seen_ids:
+                            matches.append(parsed)
+                        # Capture live scores for finished-match detection
+                        score = _parse_live_score(m)
+                        if score:
+                            current_live[score.match_id] = score
+            self.live_scores = current_live
         except Exception as e:
             logger.warning("HUDstats live fetch failed: %s", e)
 
@@ -192,4 +216,48 @@ def _parse_match(
         away=away,
         start_time=start_time,
         is_live=is_live,
+    )
+
+
+def _parse_live_score(data: dict) -> LiveScore | None:
+    """Extract a live score snapshot from a HUDstats live match object.
+
+    Returns None if scores aren't available yet (both null/missing).
+    """
+    external_id = data.get("externalId", "")
+    if not external_id:
+        return None
+
+    home_score = data.get("teamAScore")
+    away_score = data.get("teamBScore")
+
+    # Both scores must be present (non-null) for a valid snapshot
+    if home_score is None or away_score is None:
+        return None
+
+    team_a = data.get("teamAName", "")
+    team_b = data.get("teamBName", "")
+    player_a = data.get("participantAName", "")
+    player_b = data.get("participantBName", "")
+
+    if not player_a or not player_b:
+        return None
+
+    home = f"{team_a} ({player_a})" if team_a else player_a
+    away = f"{team_b} ({player_b})" if team_b else player_b
+
+    start_str = data.get("startDate", "")
+    try:
+        dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+        start_time = int(dt.timestamp())
+    except (ValueError, TypeError):
+        return None
+
+    return LiveScore(
+        match_id=f"hudstats_{external_id}",
+        home=home,
+        away=away,
+        home_score=int(home_score),
+        away_score=int(away_score),
+        start_time=start_time,
     )

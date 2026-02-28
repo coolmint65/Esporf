@@ -45,7 +45,7 @@ from esporf.sources.bwin import BwinClient
 from esporf.sources.esportsbattle import ESportsBattleClient
 from esporf.sources.fanduel import FanDuelClient
 from esporf.sources.forebet import ForebetClient
-from esporf.sources.hudstats import HUDstatsClient
+from esporf.sources.hudstats import HUDstatsClient, LiveScore
 from esporf.sources.kambi import KambiClient
 from esporf.sources.totalcorner import TotalCornerClient
 
@@ -89,6 +89,7 @@ class EsporfBot:
         self._running = False
         self._scan_count = 0
         self._alerted_keys: set[str] = set()
+        self._prev_hudstats_live: dict[str, LiveScore] = {}
         self._load_alerted_keys()
 
     # ── Name enrichment ──────────────────────────────────────────
@@ -129,6 +130,52 @@ class EsporfBot:
 
         if enriched:
             logger.info("Enriched %d bare handle(s) with team names from DB", enriched)
+
+    # ── HUDstats score harvesting ─────────────────────────────────
+
+    def _harvest_hudstats_results(self) -> int:
+        """Detect finished GG League matches by comparing live score snapshots.
+
+        Each scan cycle, HUDstats returns currently-live matches with scores.
+        When a match that was live in the previous cycle disappears from the
+        current live feed, it has finished.  We create a MatchResult from the
+        last known scores and insert it into the DB so the pick resolver can
+        grade it normally.
+
+        Returns the number of results harvested.
+        """
+        current = self.hudstats.live_scores
+        prev = self._prev_hudstats_live
+        self._prev_hudstats_live = dict(current)  # snapshot for next cycle
+
+        if not prev:
+            return 0  # first cycle — nothing to compare against
+
+        harvested = 0
+        for match_id, score in prev.items():
+            if match_id in current:
+                continue  # still live — update will happen next cycle
+
+            # Match was live last cycle but is gone now → finished
+            result = MatchResult(
+                match_id=match_id,
+                league_id=score.league_id,
+                home=score.home,
+                away=score.away,
+                home_score=score.home_score,
+                away_score=score.away_score,
+                start_time=score.start_time,
+            )
+            added = self.db.insert_many([result])
+            if added:
+                harvested += 1
+                logger.info(
+                    "Harvested GG League result: %s %d-%d %s [%s]",
+                    score.home, score.home_score, score.away_score,
+                    score.away, match_id,
+                )
+
+        return harvested
 
     # ── Pick tracking ────────────────────────────────────────────
 
@@ -626,6 +673,16 @@ class EsporfBot:
                     all_upcoming.append(m)
         except Exception as e:
             logger.warning("HUDstats schedule failed: %s", e)
+
+        # 2.5a. Harvest finished GG League matches from live score snapshots.
+        # This must run every cycle (even if HUDstats schedule failed above)
+        # so that matches which went from live→finished get captured as
+        # MatchResults in the DB before the pick resolver runs.
+        harvested = self._harvest_hudstats_results()
+        if harvested:
+            console.print(
+                f"  [dim]Harvested {harvested} GG League result(s) from HUDstats[/dim]"
+            )
 
         # 2.6. bwin: Volta schedule + odds (has pre-match odds well before kickoff)
         # bwin returns matches WITH odds pre-attached. If AceOdds/ESportsBattle
