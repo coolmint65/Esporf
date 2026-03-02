@@ -167,6 +167,7 @@ CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_upcoming_time ON upcoming_matches(start_time);",
     "CREATE INDEX IF NOT EXISTS idx_upcoming_league ON upcoming_matches(league_id);",
     "CREATE INDEX IF NOT EXISTS idx_feedback_dim ON feedback_adjustments(dimension, dimension_value);",
+    "CREATE INDEX IF NOT EXISTS idx_picks_result_resolved ON picks(result, resolved_at);",
 ]
 
 

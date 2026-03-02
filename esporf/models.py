@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import cached_property
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from esporf.analysis.feedback import FeedbackAnalyzer
+
+logger = logging.getLogger(__name__)
 
 _HANDLE_RE = re.compile(r"\(([^)]+)\)\s*$")
 
@@ -712,7 +718,7 @@ class MatchupReport:
     avg_goals: float | None = None  # match-specific expected total goals
     form_modifier: float = 1.0  # combined form quality of both players
     skip_reason: str | None = None  # set when a player is BLOCKED or skipped
-    feedback_analyzer: object | None = None  # FeedbackAnalyzer for loss-based penalties
+    feedback_analyzer: FeedbackAnalyzer | None = None
 
     @property
     def has_trends(self) -> bool:
@@ -983,7 +989,7 @@ class MatchupReport:
                 )
                 adjusted_score *= feedback_penalty
             except Exception:
-                pass  # don't let feedback errors block picks
+                logger.debug("Feedback penalty failed for %s", best_market, exc_info=True)
 
         return BetPick(
             market=best_market,

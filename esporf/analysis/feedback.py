@@ -22,6 +22,9 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from typing import Callable
+
+from esporf.models import extract_handle
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +36,21 @@ FEEDBACK_WINDOW_DAYS = 14
 
 # How many seconds in the window
 FEEDBACK_WINDOW_SECS = FEEDBACK_WINDOW_DAYS * 86400
+
+# Dimension definitions: (name, key_extractor)
+# Each extractor returns a list of keys for a given pick row.
+_DIMENSIONS: list[tuple[str, Callable]] = [
+    ("market",      lambda r: [r["market"]]),
+    ("player",      lambda r: [extract_handle(r[f]).lower() for f in ("home", "away")]),
+    ("league",      lambda r: [str(r["league_id"])]),
+    ("market_type", lambda r: [_classify_market(r["market"])]),
+    ("edge_bucket", lambda r: [_edge_bucket(r["edge"] or 0.0)]),
+]
+
+_FEEDBACK_COLUMNS = (
+    "dimension", "dimension_value", "penalty", "win_rate",
+    "sample_size", "wins", "losses", "profit", "reason", "updated_at",
+)
 
 
 @dataclass
@@ -62,15 +80,13 @@ class FeedbackAnalyzer:
     def __init__(self, db):
         self.db = db
         self._cache: dict[str, FeedbackAdjustment] = {}
-        self._last_computed: int = 0
 
     def compute_adjustments(self) -> dict[str, FeedbackAdjustment]:
         """Recompute all feedback adjustments from recent resolved picks.
 
         Returns a dict keyed by "dimension:value" (e.g. "market:Over 5.5 Goals").
         """
-        now = int(time.time())
-        cutoff = now - FEEDBACK_WINDOW_SECS
+        cutoff = int(time.time()) - FEEDBACK_WINDOW_SECS
 
         conn = self.db._get_conn()
         rows = conn.execute(
@@ -85,72 +101,25 @@ class FeedbackAnalyzer:
 
         if not rows:
             self._cache = {}
-            self._last_computed = now
             return self._cache
 
-        adjustments: dict[str, FeedbackAdjustment] = {}
-
-        # Group picks by each dimension
-        by_market: dict[str, list] = {}
-        by_player: dict[str, list] = {}
-        by_league: dict[str, list] = {}
-        by_market_type: dict[str, list] = {}
-        by_edge_bucket: dict[str, list] = {}
+        # Group picks by each dimension using data-driven config
+        grouped: dict[str, dict[str, list]] = {dim: {} for dim, _ in _DIMENSIONS}
 
         for r in rows:
-            market = r["market"]
-            result = r["result"]
-
-            # Market dimension
-            by_market.setdefault(market, []).append(r)
-
-            # Player dimension — both home and away
-            from esporf.models import extract_handle
-            for player_field in ("home", "away"):
-                handle = extract_handle(r[player_field]).lower()
-                by_player.setdefault(handle, []).append(r)
-
-            # League dimension
-            lid = str(r["league_id"])
-            by_league.setdefault(lid, []).append(r)
-
-            # Market type: "over", "under", "win", "spread", "draw"
-            mtype = _classify_market(market)
-            by_market_type.setdefault(mtype, []).append(r)
-
-            # Edge bucket: low (12-18%), mid (18-25%), high (25%+)
-            edge = r["edge"] or 0.0
-            bucket = _edge_bucket(edge)
-            by_edge_bucket.setdefault(bucket, []).append(r)
+            for dim_name, extractor in _DIMENSIONS:
+                for key in extractor(r):
+                    grouped[dim_name].setdefault(key, []).append(r)
 
         # Compute adjustment for each group
-        for market, picks in by_market.items():
-            adj = self._compute_one("market", market, picks)
-            if adj:
-                adjustments[f"market:{market}"] = adj
-
-        for handle, picks in by_player.items():
-            adj = self._compute_one("player", handle, picks)
-            if adj:
-                adjustments[f"player:{handle}"] = adj
-
-        for lid, picks in by_league.items():
-            adj = self._compute_one("league", lid, picks)
-            if adj:
-                adjustments[f"league:{lid}"] = adj
-
-        for mtype, picks in by_market_type.items():
-            adj = self._compute_one("market_type", mtype, picks)
-            if adj:
-                adjustments[f"market_type:{mtype}"] = adj
-
-        for bucket, picks in by_edge_bucket.items():
-            adj = self._compute_one("edge_bucket", bucket, picks)
-            if adj:
-                adjustments[f"edge_bucket:{bucket}"] = adj
+        adjustments: dict[str, FeedbackAdjustment] = {}
+        for dim_name, groups in grouped.items():
+            for key, picks in groups.items():
+                adj = self._compute_one(dim_name, key, picks)
+                if adj:
+                    adjustments[f"{dim_name}:{key}"] = adj
 
         self._cache = adjustments
-        self._last_computed = now
         self._persist(adjustments)
         self._log_summary(adjustments)
 
@@ -167,13 +136,11 @@ class FeedbackAnalyzer:
         """Get the combined penalty multiplier for a prospective pick.
 
         Multiplies together all applicable dimension penalties.
-        Returns a value between ~0.3 and ~1.2. Applied to the pick's
+        Returns a value between ~0.4 and ~1.2. Applied to the pick's
         confidence score in best_bet().
         """
         if not self._cache:
             return 1.0
-
-        from esporf.models import extract_handle
 
         combined = 1.0
 
@@ -252,17 +219,19 @@ class FeedbackAnalyzer:
         """Store adjustments in the database for persistence across restarts."""
         conn = self.db._get_conn()
 
-        # Clear old adjustments and insert fresh ones
         conn.execute("DELETE FROM feedback_adjustments")
-        for key, adj in adjustments.items():
-            conn.execute(
+        if adjustments:
+            conn.executemany(
                 """INSERT INTO feedback_adjustments
                    (dimension, dimension_value, penalty, win_rate, sample_size,
                     wins, losses, profit, reason, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (adj.dimension, adj.value, adj.penalty, adj.win_rate,
-                 adj.sample_size, adj.wins, adj.losses, adj.profit,
-                 adj.reason, adj.updated_at),
+                [
+                    (a.dimension, a.value, a.penalty, a.win_rate,
+                     a.sample_size, a.wins, a.losses, a.profit,
+                     a.reason, a.updated_at)
+                    for a in adjustments.values()
+                ],
             )
         conn.commit()
 
@@ -271,10 +240,13 @@ class FeedbackAnalyzer:
         conn = self.db._get_conn()
         try:
             rows = conn.execute(
-                "SELECT * FROM feedback_adjustments"
+                """SELECT dimension, dimension_value, penalty, win_rate,
+                          sample_size, wins, losses, profit, reason, updated_at
+                   FROM feedback_adjustments"""
             ).fetchall()
         except Exception:
-            return  # table may not exist yet
+            logger.debug("feedback_adjustments table not ready yet", exc_info=True)
+            return
 
         for r in rows:
             adj = FeedbackAdjustment(
