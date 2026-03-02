@@ -763,8 +763,9 @@ class MatchupReport:
         At least 2 trends must agree on a market to recommend it.
         Max juice is -150 (decimal 1.667) — anything worse is rejected.
         """
-        MIN_EDGE = 0.08  # 8% minimum edge to recommend
+        MIN_EDGE = 0.12  # 12% minimum edge to recommend (up from 8%)
         MAX_JUICE_ODDS = 1.667  # -150 American; reject anything below
+        MIN_REAL_TRENDS = 3  # minimum real (non-synthetic) trends backing a pick
 
         best_market: str | None = None
         best_score = 0.0
@@ -780,9 +781,20 @@ class MatchupReport:
             parsed = _parse_line(market)
             parsed_spread = _parse_spread(market)
             agreement = len(trends)
-            if agreement < 2:
-                continue  # need at least 2 trends backing a pick
-            avg_rate = sum(t.hit_rate for t in trends) / agreement
+            # Count only real trends (sample_size >= 5) toward agreement;
+            # synthetic signals like Forebet (sample_size=1) can boost
+            # confidence but shouldn't meet the threshold on their own.
+            real_trends = [t for t in trends if t.sample_size >= 5]
+            if len(real_trends) < MIN_REAL_TRENDS:
+                continue  # need at least 3 real trends backing a pick
+            # Weight avg_rate by sample size so large-sample trends
+            # contribute more than small-sample or synthetic ones.
+            total_weight = sum(t.sample_size for t in trends)
+            avg_rate = (
+                sum(t.hit_rate * t.sample_size for t in trends) / total_weight
+                if total_weight > 0
+                else 0.0
+            )
             avg_sample = sum(t.sample_size for t in trends) / agreement
 
             if parsed:
@@ -790,6 +802,16 @@ class MatchupReport:
                 odds_line = odds.get_line(line)
                 if not odds_line:
                     continue  # line not offered by the book — skip it
+
+                # Reject phantom lines: Over/Under picks too far from the
+                # expected total are near-guaranteed hits with garbage odds
+                # (e.g. Over 2.5 when avg_goals is 7.0).  These inflate
+                # P/L without representing real bettable value.
+                if self.avg_goals and self.avg_goals > 0:
+                    if direction.lower() == "over" and line < self.avg_goals - 3.0:
+                        continue
+                    if direction.lower() == "under" and line > self.avg_goals + 3.0:
+                        continue
 
                 if direction.lower() == "over":
                     implied = odds_line.over_implied

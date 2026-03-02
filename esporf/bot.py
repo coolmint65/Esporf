@@ -206,6 +206,21 @@ class EsporfBot:
         if not pick:
             return None
 
+        # Guard: reject O/U picks for lines not in the match's actual odds.
+        # Different odds sources can merge lines from different books, leading
+        # to phantom picks like "Over 2.5" when the primary book starts at 5.5.
+        odds = report.match.odds
+        parsed = _parse_line(pick.market)
+        if parsed and odds and odds.has_data:
+            direction, line = parsed
+            if not odds.get_line(line):
+                logger.warning(
+                    "Rejected pick — line %.1f not in current odds (%s): %s %s",
+                    line, odds.available_lines,
+                    report.match.display_name, pick.market,
+                )
+                return None
+
         # Resolve decimal odds — fall back to ML side lookup if property
         # returns None (can happen when _ml_side isn't set on the BetPick).
         dec_odds = pick.decimal_odds
@@ -297,11 +312,11 @@ class EsporfBot:
             # Remove directly resolved picks from the stale list
             stale = [p for p in stale if p.id not in direct_resolved]
 
-            # 2b. Bulk fetch ended matches (2 pages) for remaining stale picks
+            # 2b. Bulk fetch ended matches (3 pages) for remaining stale picks
             if stale:
                 stale_leagues = {p.league_id for p in stale}
                 for lid in stale_leagues:
-                    for page in (1, 2):
+                    for page in (1, 2, 3):
                         try:
                             ended = await self.api.get_ended_matches(lid, page=page)
                             added = self.db.insert_many(ended)
@@ -413,9 +428,11 @@ class EsporfBot:
         #    _handle_patterns builds both bare and parenthesized LIKE patterns
         #    so lookups work regardless of name format differences between
         #    sources (e.g. Kambi bare "ALPHA" vs BetsAPI "Chelsea (ALPHA)").
+        #    600s tolerance (up from 300s) because HUDstats, Kambi, and BetsAPI
+        #    can report start times several minutes apart for the same match.
         h2h = self.db.get_h2h_matches(pick.home, pick.away, limit=10)
         for match in h2h:
-            if abs(match.start_time - pick.start_time) <= 300:
+            if abs(match.start_time - pick.start_time) <= 600:
                 return match
         return None
 
@@ -604,6 +621,15 @@ class EsporfBot:
             except Exception as e:
                 logger.warning("Failed to fetch ended matches for league %d: %s", lid, e)
 
+        # Harvest finished GG League matches from live score snapshots
+        # BEFORE resolving picks — ensures freshly-finished matches are
+        # available as MatchResults for the pick resolver this cycle.
+        harvested = self._harvest_hudstats_results()
+        if harvested:
+            console.print(
+                f"  [dim]Harvested {harvested} GG League result(s) from HUDstats[/dim]"
+            )
+
         # Refresh player form stats with the new results
         self.db.rebuild_player_form(settings.tracked_league_ids)
 
@@ -674,15 +700,9 @@ class EsporfBot:
         except Exception as e:
             logger.warning("HUDstats schedule failed: %s", e)
 
-        # 2.5a. Harvest finished GG League matches from live score snapshots.
-        # This must run every cycle (even if HUDstats schedule failed above)
-        # so that matches which went from live→finished get captured as
-        # MatchResults in the DB before the pick resolver runs.
-        harvested = self._harvest_hudstats_results()
-        if harvested:
-            console.print(
-                f"  [dim]Harvested {harvested} GG League result(s) from HUDstats[/dim]"
-            )
+        # Note: HUDstats result harvesting was already run above (before
+        # resolve_pending_picks) to ensure finished matches are captured
+        # as MatchResults before the pick resolver processes them.
 
         # 2.6. bwin: Volta schedule + odds (has pre-match odds well before kickoff)
         # bwin returns matches WITH odds pre-attached. If AceOdds/ESportsBattle
@@ -708,6 +728,8 @@ class EsporfBot:
             logger.warning("bwin Volta schedule failed: %s", e)
 
         # 3. Kambi: schedule + odds in one shot (GG League, GT Leagues)
+        # If HUDstats already added a GG League match (without odds),
+        # merge the Kambi odds in — same pattern as bwin for Volta.
         kambi_league_ids: set[int] = set()
         try:
             kambi_matches = await self.kambi.get_schedule(settings.tracked_league_ids)
@@ -718,13 +740,22 @@ class EsporfBot:
                     seen_keys.add(key)
                     key_to_idx[key] = len(all_upcoming)
                     all_upcoming.append(m)
+                elif key in key_to_idx and m.odds and m.odds.has_data:
+                    # Match already exists from HUDstats — transfer Kambi odds
+                    existing = all_upcoming[key_to_idx[key]]
+                    if not (existing.odds and existing.odds.has_data):
+                        existing.odds = m.odds
+                        logger.info(
+                            "Merged Kambi odds into %s", existing.display_name,
+                        )
         except Exception as e:
             logger.warning("Kambi schedule failed: %s", e)
 
-        # 4. Supplementary: BetsAPI (leagues not covered by Kambi)
+        # 4. Supplementary: BetsAPI for all leagues.  Even when Kambi
+        # already provided schedule + odds, we still need BetsAPI to
+        # cross-reference match IDs — picks with kambi_/hudstats_ IDs
+        # can't resolve results via direct BetsAPI event view.
         for lid in settings.tracked_league_ids:
-            if lid in kambi_league_ids:
-                continue  # Kambi already provided schedule + odds for this league
             try:
                 schedule = await self.api.get_full_schedule(lid)
                 for m in schedule:
@@ -751,12 +782,12 @@ class EsporfBot:
         # Match by player pair + approximate time (within 5 min) to fix this.
         still_unresolved = [
             (i, m) for i, m in enumerate(all_upcoming)
-            if m.match_id.startswith(("esb_", "ace_", "hudstats_"))
+            if m.match_id.startswith(("esb_", "ace_", "hudstats_", "kambi_"))
         ]
         if still_unresolved:
             betsapi_lookup: dict[tuple[str, str], list[tuple[int, UpcomingMatch]]] = {}
             for i, m in enumerate(all_upcoming):
-                if m.match_id.startswith(("esb_", "ace_", "hudstats_")):
+                if m.match_id.startswith(("esb_", "ace_", "hudstats_", "kambi_")):
                     continue
                 h = extract_handle(m.home).lower()
                 a = extract_handle(m.away).lower()
@@ -859,7 +890,7 @@ class EsporfBot:
         # so a quick re-check here can catch matches that just appeared.
         still_unresolved = [
             m for m in all_upcoming
-            if m.match_id.startswith(("esb_", "ace_", "hudstats_"))
+            if m.match_id.startswith(("esb_", "ace_", "hudstats_", "kambi_"))
         ]
         if still_unresolved:
             console.print(
@@ -868,10 +899,8 @@ class EsporfBot:
             )
             try:
                 fresh: list[UpcomingMatch] = []
-                # Only query BetsAPI for leagues not covered by Kambi
+                # Query BetsAPI for all leagues to cross-reference IDs
                 for lid in settings.tracked_league_ids:
-                    if lid in kambi_league_ids:
-                        continue
                     fresh.extend(await self.api.get_inplay_matches(lid))
                     fresh.extend(await self.api.get_upcoming_matches(lid))
 
