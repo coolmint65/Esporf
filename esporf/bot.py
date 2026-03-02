@@ -23,6 +23,7 @@ from datetime import datetime
 from rich.console import Console
 
 from esporf.alerts.console import display_matchup_report, display_reports_by_league, display_scan_summary
+from esporf.analysis.feedback import FeedbackAnalyzer
 from esporf.analysis.trends import TrendAnalyzer
 from esporf.config import settings
 from esporf.database import MatchDatabase
@@ -86,6 +87,8 @@ class EsporfBot:
         self.forebet = ForebetClient()
         self.db = MatchDatabase()
         self.analyzer = TrendAnalyzer(self.db)
+        self.feedback = FeedbackAnalyzer(self.db)
+        self.feedback.load_from_db()  # restore learned adjustments across restarts
         self._running = False
         self._scan_count = 0
         self._alerted_keys: set[str] = set()
@@ -634,7 +637,12 @@ class EsporfBot:
         self.db.rebuild_player_form(settings.tracked_league_ids)
 
         # Resolve any pending picks now that we have fresh results
-        await self.resolve_pending_picks()
+        resolved_picks = await self.resolve_pending_picks()
+
+        # Recompute feedback adjustments when picks resolve — the bot learns
+        # from wins/losses and adjusts confidence scoring for future picks.
+        if resolved_picks:
+            self.feedback.compute_adjustments()
 
         # Fetch external data (TotalCorner + Forebet) in parallel
         await self._fetch_external_data()
@@ -1118,6 +1126,8 @@ class EsporfBot:
             report = self.analyzer.analyze_matchup(
                 match, tc_stats=tc_stats, forebet_pred=forebet_pred
             )
+            # Attach feedback analyzer so best_bet() can apply learned penalties
+            report.feedback_analyzer = self.feedback
             reports.append(report)
 
         # Log diagnostic for non-Volta leagues — surface why picks are/aren't generated
@@ -1215,6 +1225,11 @@ class EsporfBot:
                 f"Recommended: 180s. Update POLL_INTERVAL in your .env file.[/bold yellow]\n"
             )
 
+        feedback_status = (
+            f"[bold green]{len(self.feedback.adjustments)} adjustment(s) loaded[/bold green]"
+            if self.feedback.has_data
+            else "[dim]no history yet[/dim]"
+        )
         console.print(
             f"[bold blue]Esporf Odds Bot Starting[/bold blue]\n"
             f"  Tracking leagues: {settings.league_ids}\n"
@@ -1223,6 +1238,7 @@ class EsporfBot:
             f"  External: [bold cyan]TotalCorner[/bold cyan] + Forebet\n"
             f"  Odds: BetsAPI (bet365) + [bold cyan]Kambi[/bold cyan] + [bold green]bwin[/bold green] (Volta) + [bold cyan]FanDuel[/bold cyan]\n"
             f"  Mode: [bold green]Sportsbook odds only[/bold green] (no trend-only picks)\n"
+            f"  Feedback: {feedback_status} (learns from losses)\n"
             f"  Min hit rate: {settings.min_hit_rate:.0%}\n"
             f"  Min sample size: {settings.min_sample_size}\n"
             f"  Press Ctrl+C to stop\n"
@@ -1230,6 +1246,16 @@ class EsporfBot:
 
         # Backfill history on startup
         await self.backfill()
+
+        # Compute feedback adjustments from historical picks
+        self.feedback.compute_adjustments()
+        if self.feedback.has_data:
+            penalties = sum(1 for a in self.feedback.adjustments.values() if a.penalty < 0.95)
+            boosts = sum(1 for a in self.feedback.adjustments.values() if a.penalty > 1.05)
+            console.print(
+                f"  [dim]Feedback engine: {len(self.feedback.adjustments)} adjustments "
+                f"({penalties} penalties, {boosts} boosts)[/dim]\n"
+            )
 
         # Set up signal handlers (add_signal_handler is not supported on Windows)
         if os.name != "nt":

@@ -133,6 +133,22 @@ CREATE TABLE IF NOT EXISTS upcoming_matches (
 );
 """
 
+CREATE_FEEDBACK_TABLE = """
+CREATE TABLE IF NOT EXISTS feedback_adjustments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dimension TEXT NOT NULL,
+    dimension_value TEXT NOT NULL,
+    penalty REAL NOT NULL DEFAULT 1.0,
+    win_rate REAL NOT NULL DEFAULT 0.0,
+    sample_size INTEGER NOT NULL DEFAULT 0,
+    wins INTEGER NOT NULL DEFAULT 0,
+    losses INTEGER NOT NULL DEFAULT 0,
+    profit REAL NOT NULL DEFAULT 0.0,
+    reason TEXT NOT NULL DEFAULT '',
+    updated_at INTEGER NOT NULL DEFAULT 0
+);
+"""
+
 CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_matches_home ON matches(home);",
     "CREATE INDEX IF NOT EXISTS idx_matches_away ON matches(away);",
@@ -150,6 +166,7 @@ CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_scan_log_time ON scan_log(started_at DESC);",
     "CREATE INDEX IF NOT EXISTS idx_upcoming_time ON upcoming_matches(start_time);",
     "CREATE INDEX IF NOT EXISTS idx_upcoming_league ON upcoming_matches(league_id);",
+    "CREATE INDEX IF NOT EXISTS idx_feedback_dim ON feedback_adjustments(dimension, dimension_value);",
 ]
 
 
@@ -176,6 +193,7 @@ class MatchDatabase:
         conn.execute(CREATE_ODDS_SNAPSHOTS_TABLE)
         conn.execute(CREATE_SCAN_LOG_TABLE)
         conn.execute(CREATE_UPCOMING_TABLE)
+        conn.execute(CREATE_FEEDBACK_TABLE)
         self._deduplicate_picks(conn)
         for idx_sql in CREATE_INDEXES:
             conn.execute(idx_sql)

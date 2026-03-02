@@ -712,6 +712,7 @@ class MatchupReport:
     avg_goals: float | None = None  # match-specific expected total goals
     form_modifier: float = 1.0  # combined form quality of both players
     skip_reason: str | None = None  # set when a player is BLOCKED or skipped
+    feedback_analyzer: object | None = None  # FeedbackAnalyzer for loss-based penalties
 
     @property
     def has_trends(self) -> bool:
@@ -968,6 +969,21 @@ class MatchupReport:
         # Apply form modifier — elite-form players boost confidence
         # (and unit sizing), poor-form players scale it down.
         adjusted_score = best_score * self.form_modifier
+
+        # Apply feedback penalty — learned from historical loss patterns.
+        # Penalizes markets/players/leagues that have been underperforming.
+        if self.feedback_analyzer is not None:
+            try:
+                feedback_penalty = self.feedback_analyzer.get_penalty(
+                    market=best_market,
+                    home=self.match.home,
+                    away=self.match.away,
+                    league_id=self.match.league_id,
+                    edge=best_edge,
+                )
+                adjusted_score *= feedback_penalty
+            except Exception:
+                pass  # don't let feedback errors block picks
 
         return BetPick(
             market=best_market,
