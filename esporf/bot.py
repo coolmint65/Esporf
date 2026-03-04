@@ -37,8 +37,8 @@ from esporf.models import (
     UpcomingMatch,
     extract_handle,
     extract_team,
-    _parse_line,
-    _parse_spread,
+    parse_line,
+    parse_spread,
 )
 from esporf.sources.aceodds import AceOddsClient
 from esporf.sources.betsapi import BetsAPIClient
@@ -93,7 +93,18 @@ class EsporfBot:
         self._scan_count = 0
         self._alerted_keys: set[str] = set()
         self._prev_hudstats_live: dict[str, LiveScore] = {}
+        # All async HTTP clients — used by close() for clean shutdown
+        self._http_clients = [
+            self.api, self.esb, self.ace, self.kambi,
+            self.hudstats, self.bwin, self.fanduel, self.tc, self.forebet,
+        ]
         self._load_alerted_keys()
+
+    async def close(self) -> None:
+        """Shut down all HTTP clients and the database connection."""
+        for client in self._http_clients:
+            await client.close()
+        self.db.close()
 
     # ── Name enrichment ──────────────────────────────────────────
 
@@ -213,7 +224,7 @@ class EsporfBot:
         # Different odds sources can merge lines from different books, leading
         # to phantom picks like "Over 2.5" when the primary book starts at 5.5.
         odds = report.match.odds
-        parsed = _parse_line(pick.market)
+        parsed = parse_line(pick.market)
         if parsed and odds and odds.has_data:
             direction, line = parsed
             if not odds.get_line(line):
@@ -450,8 +461,8 @@ class EsporfBot:
         market = pick.market
         total_goals = result.total_goals
 
-        parsed_line = _parse_line(market)
-        parsed_spread = _parse_spread(market)
+        parsed_line = parse_line(market)
+        parsed_spread = parse_spread(market)
 
         won = False
 

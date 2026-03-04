@@ -41,6 +41,7 @@ from esporf.models import (
     SpreadLine,
     UpcomingMatch,
     extract_handle,
+    match_by_handles,
 )
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,7 @@ class BwinClient:
         self._cache: list[_BwinFixture] = []
         self._cache_time: float = 0
         self._access_id: str = _ACCESS_ID
+        self._access_id_time: float = 0
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -268,7 +270,7 @@ class BwinClient:
         cached ID is more than 1 hour old.
         """
         # Only refresh every hour
-        if hasattr(self, "_access_id_time") and (time.time() - self._access_id_time) < 3600:
+        if (time.time() - self._access_id_time) < 3600:
             return
 
         try:
@@ -527,30 +529,8 @@ def _find_matching_fixture(
     match: UpcomingMatch,
     fixtures: list[_BwinFixture],
 ) -> _BwinFixture | None:
-    """Find the bwin fixture that corresponds to our UpcomingMatch.
-
-    bwin uses the same "Team (Handle)" naming as BetsAPI/Kambi, so we
-    match on player handles (case-insensitive) and start time within
-    a tolerance window.
-    """
-    our_home = extract_handle(match.home).lower()
-    our_away = extract_handle(match.away).lower()
-    our_pair = frozenset([our_home, our_away])
-
-    best: _BwinFixture | None = None
-    best_delta = _TIME_TOLERANCE + 1
-
-    for fix in fixtures:
-        bwin_home = extract_handle(fix.home).lower()
-        bwin_away = extract_handle(fix.away).lower()
-        bwin_pair = frozenset([bwin_home, bwin_away])
-
-        if our_pair != bwin_pair:
-            continue
-
-        delta = abs(fix.start_time - match.start_time)
-        if delta <= _TIME_TOLERANCE and delta < best_delta:
-            best = fix
-            best_delta = delta
-
-    return best
+    """Find the bwin fixture that corresponds to our UpcomingMatch."""
+    return match_by_handles(
+        match.home, match.away, match.start_time,
+        fixtures, time_tolerance=_TIME_TOLERANCE,
+    )
