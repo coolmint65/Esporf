@@ -7,8 +7,9 @@ Interactive docs available at /docs (Swagger UI).
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +22,7 @@ from esporf.database import MatchDatabase
 from esporf.models import (
     League,
     PickResult,
+    PlayerForm,
     extract_handle,
     league_display_name,
 )
@@ -207,6 +209,40 @@ class H2HResponse(BaseModel):
     total_matches: int
     matches: list[MatchResponse]
     summary: dict
+
+
+class ScheduleMatchResponse(BaseModel):
+    match_id: str
+    league: str
+    league_id: int
+    home: str
+    away: str
+    home_score: int
+    away_score: int
+    total_goals: int
+    score: str
+    winner: str | None
+    start_time: int
+    start_time_fmt: str
+    status: str = "completed"  # "completed", "upcoming", or "live"
+    home_stats: dict | None = None
+    away_stats: dict | None = None
+    has_pick: bool = False
+
+
+class ScheduleResponse(BaseModel):
+    date: str
+    matches: list[ScheduleMatchResponse]
+    total: int
+
+
+class MatchDetailResponse(BaseModel):
+    match: MatchResponse
+    home_form: PlayerResponse | None = None
+    away_form: PlayerResponse | None = None
+    h2h: dict | None = None
+    picks: list[PickResponse] = []
+    recommendation: dict | None = None
 
 
 class ScanStatusResponse(BaseModel):
@@ -508,6 +544,97 @@ def get_stats_breakdown():
             by_market=by_market,
             by_confidence=by_confidence,
         )
+    finally:
+        db.close()
+
+
+class DailyStatsResponse(BaseModel):
+    today: StatsResponse
+    all_time: StatsResponse
+
+
+class DailyProfitPoint(BaseModel):
+    date: str  # YYYY-MM-DD
+    profit: float  # daily P&L
+    cumulative: float  # running total
+    picks: int  # picks decided that day
+
+
+@app.get("/api/stats/daily", response_model=DailyStatsResponse)
+def get_daily_stats():
+    """Today's record/profit alongside all-time stats."""
+    db = _get_db()
+    try:
+        # Today's boundary in display timezone
+        display_tz = ZoneInfo(settings.timezone)
+        now_local = datetime.now(display_tz)
+        today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_unix = int(today_start.timestamp())
+
+        today_summary = db.get_pick_summary(since=today_unix)
+        all_summary = db.get_pick_summary()
+
+        today_stats = _build_stats(today_summary)
+        all_stats = _build_stats(all_summary)
+
+        # Add match-level data to all_time
+        conn = db._get_conn()
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt, AVG(home_score + away_score) as avg_goals FROM matches"
+        ).fetchone()
+        players_row = conn.execute(
+            "SELECT COUNT(DISTINCT handle) as cnt FROM player_form"
+        ).fetchone()
+        all_stats.total_matches = row["cnt"]
+        all_stats.total_players = players_row["cnt"]
+        all_stats.avg_total_goals = round(row["avg_goals"], 1) if row["avg_goals"] else None
+        all_stats.avg_total_goals_display = f"{row['avg_goals']:.1f}" if row["avg_goals"] else "--"
+
+        return DailyStatsResponse(today=today_stats, all_time=all_stats)
+    finally:
+        db.close()
+
+
+@app.get("/api/stats/chart", response_model=list[DailyProfitPoint])
+def get_stats_chart(
+    days: int = Query(7, ge=1, le=90, description="Number of days to chart"),
+):
+    """Daily profit/loss for charting — one data point per day."""
+    db = _get_db()
+    try:
+        display_tz = ZoneInfo(settings.timezone)
+        all_picks = db.get_all_picks(limit=50000)
+        # Bucket resolved picks by date
+        daily: dict[str, dict] = {}
+        for p in all_picks:
+            if p.result == PickResult.PENDING:
+                continue
+            dt = datetime.fromtimestamp(p.created_at, tz=display_tz)
+            date_key = dt.strftime("%Y-%m-%d")
+            if date_key not in daily:
+                daily[date_key] = {"profit": 0.0, "picks": 0}
+            daily[date_key]["profit"] += p.profit
+            daily[date_key]["picks"] += 1
+
+        # Build sorted list for last N days
+        now_local = datetime.now(display_tz)
+        result = []
+        cumulative = 0.0
+        # Get all dates sorted, filter to window
+        cutoff_date = (now_local - timedelta(days=days)).strftime("%Y-%m-%d")
+        for date_key in sorted(daily.keys()):
+            if date_key < cutoff_date:
+                cumulative += daily[date_key]["profit"]
+                continue
+            day_profit = round(daily[date_key]["profit"], 2)
+            cumulative += day_profit
+            result.append(DailyProfitPoint(
+                date=date_key,
+                profit=day_profit,
+                cumulative=round(cumulative, 2),
+                picks=daily[date_key]["picks"],
+            ))
+        return result
     finally:
         db.close()
 
@@ -834,6 +961,379 @@ def get_leagues():
         return results
     finally:
         db.close()
+
+
+@app.get("/api/schedule", response_model=list[ScheduleResponse])
+def get_schedule(
+    days: int = Query(1, ge=1, le=7, description="Number of days to show (1-7)"),
+    league_id: int | None = Query(None, description="Filter by league ID"),
+):
+    """Match schedule grouped by date with player stats for each match."""
+    db = _get_db()
+    try:
+        conn = db._get_conn()
+        cutoff = int(time.time()) - (days * 86400)
+
+        # Fetch matches
+        if league_id:
+            rows = conn.execute(
+                """SELECT * FROM matches WHERE start_time >= ? AND league_id = ?
+                   ORDER BY start_time DESC""",
+                (cutoff, league_id),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT * FROM matches WHERE start_time >= ?
+                   ORDER BY start_time DESC""",
+                (cutoff,),
+            ).fetchall()
+
+        matches = [db._row_to_match(r) for r in rows]
+
+        # Get all pick match_ids for quick lookup
+        pick_rows = conn.execute(
+            "SELECT DISTINCT match_id FROM picks WHERE start_time >= ?",
+            (cutoff,),
+        ).fetchall()
+        pick_match_ids = {r["match_id"] for r in pick_rows}
+
+        # Cache player forms for efficiency
+        form_cache: dict[str, PlayerForm | None] = {}
+
+        def _get_form(handle: str, lid: int) -> PlayerForm | None:
+            key = f"{handle.lower()}_{lid}"
+            if key not in form_cache:
+                form_cache[key] = db.get_player_form(handle, league_id=lid)
+            return form_cache[key]
+
+        # Group by date in the configured display timezone
+        display_tz = ZoneInfo(settings.timezone)
+        date_groups: dict[str, list[ScheduleMatchResponse]] = {}
+
+        def _build_stats(handle: str, lid: int) -> dict | None:
+            form = _get_form(handle, lid)
+            if not form:
+                return None
+            return {
+                "handle": form.handle,
+                "win_rate_pct": f"{form.win_rate:.0%}",
+                "avg_goals": round(form.avg_total_goals, 1),
+                "over_2_5_pct": f"{form.over_2_5_rate:.0%}",
+                "over_4_5_pct": f"{form.over_4_5_rate:.0%}",
+                "form_trend": form.form_trend,
+                "tier": form.tier.label,
+                "matches": form.matches_played,
+            }
+
+        # Completed matches
+        for m in matches:
+            dt = datetime.fromtimestamp(m.start_time, tz=display_tz)
+            date_key = dt.strftime("%Y-%m-%d")
+
+            entry = ScheduleMatchResponse(
+                match_id=m.match_id,
+                league=league_display_name(m.league_id),
+                league_id=m.league_id,
+                home=m.home,
+                away=m.away,
+                home_score=m.home_score,
+                away_score=m.away_score,
+                total_goals=m.total_goals,
+                score=m.score_str(),
+                winner=m.winner,
+                start_time=m.start_time,
+                start_time_fmt=_fmt_time(m.start_time),
+                status="completed",
+                home_stats=_build_stats(extract_handle(m.home), m.league_id),
+                away_stats=_build_stats(extract_handle(m.away), m.league_id),
+                has_pick=m.match_id in pick_match_ids,
+            )
+            date_groups.setdefault(date_key, []).append(entry)
+
+        # Upcoming / live matches from the latest scan
+        # Only show upcoming within the next 2 hours to avoid clutter
+        completed_ids = {m.match_id for m in matches}
+        upcoming_rows = db.get_upcoming(league_id)
+        max_upcoming_time = int(time.time()) + 7200  # 2 hours from now
+        for row in upcoming_rows:
+            if row["match_id"] in completed_ids:
+                continue
+            if not row["is_live"] and row["start_time"] > max_upcoming_time:
+                continue  # too far in the future
+            dt = datetime.fromtimestamp(row["start_time"], tz=display_tz)
+            date_key = dt.strftime("%Y-%m-%d")
+            is_live = bool(row["is_live"])
+
+            entry = ScheduleMatchResponse(
+                match_id=row["match_id"],
+                league=league_display_name(row["league_id"]),
+                league_id=row["league_id"],
+                home=row["home"],
+                away=row["away"],
+                home_score=0,
+                away_score=0,
+                total_goals=0,
+                score="vs",
+                winner=None,
+                start_time=row["start_time"],
+                start_time_fmt=_fmt_time(row["start_time"]),
+                status="live" if is_live else "upcoming",
+                home_stats=_build_stats(extract_handle(row["home"]), row["league_id"]),
+                away_stats=_build_stats(extract_handle(row["away"]), row["league_id"]),
+                has_pick=row["match_id"] in pick_match_ids,
+            )
+            date_groups.setdefault(date_key, []).append(entry)
+
+        # Sort: live first, then upcoming (soonest first), then completed (soonest first)
+        def _match_sort_key(m: ScheduleMatchResponse):
+            if m.status == "live":
+                return (0, m.start_time)
+            if m.status == "upcoming":
+                return (1, m.start_time)
+            return (2, m.start_time)
+
+        result = []
+        for date_key in sorted(date_groups.keys(), reverse=True):
+            group = sorted(date_groups[date_key], key=_match_sort_key)
+            result.append(ScheduleResponse(
+                date=date_key,
+                matches=group,
+                total=len(group),
+            ))
+        return result
+    finally:
+        db.close()
+
+
+@app.get("/api/match/{match_id}/detail", response_model=MatchDetailResponse)
+def get_match_detail(match_id: str):
+    """Detailed match breakdown with player forms, H2H, picks, and recommendation."""
+    db = _get_db()
+    try:
+        conn = db._get_conn()
+
+        # 1. Get the match (check completed matches first, then upcoming)
+        row = conn.execute(
+            "SELECT * FROM matches WHERE match_id = ?", (match_id,)
+        ).fetchone()
+        is_upcoming = False
+        if row:
+            m = db._row_to_match(row)
+            match_resp = _match_to_response(m)
+        else:
+            # Try upcoming_matches table for live/upcoming matches
+            urow = conn.execute(
+                "SELECT * FROM upcoming_matches WHERE match_id = ?", (match_id,)
+            ).fetchone()
+            if not urow:
+                raise HTTPException(status_code=404, detail=f"Match '{match_id}' not found")
+            is_upcoming = True
+            match_resp = MatchResponse(
+                match_id=urow["match_id"],
+                league=league_display_name(urow["league_id"]),
+                league_id=urow["league_id"],
+                home=urow["home"],
+                away=urow["away"],
+                home_score=0,
+                away_score=0,
+                total_goals=0,
+                score="vs",
+                winner=None,
+                start_time=urow["start_time"],
+                start_time_fmt=_fmt_time(urow["start_time"]),
+            )
+
+        # 2. Player forms
+        home_name = match_resp.home
+        away_name = match_resp.away
+        league_id_val = match_resp.league_id
+        home_handle = extract_handle(home_name)
+        away_handle = extract_handle(away_name)
+        home_form_data = db.get_player_form(home_handle, league_id=league_id_val)
+        away_form_data = db.get_player_form(away_handle, league_id=league_id_val)
+
+        home_resp = _form_to_response(home_form_data) if home_form_data else None
+        away_resp = _form_to_response(away_form_data) if away_form_data else None
+
+        # 3. H2H
+        h2h_matches = db.get_h2h_matches(home_name, away_name, limit=20)
+        h2h_data = None
+        if h2h_matches:
+            a_wins = sum(1 for x in h2h_matches if x.won_by(home_name))
+            b_wins = sum(1 for x in h2h_matches if x.won_by(away_name))
+            draws = sum(1 for x in h2h_matches if x.is_draw)
+            total_goals = sum(x.total_goals for x in h2h_matches)
+            n = len(h2h_matches)
+            overs = {2.5: 0, 3.5: 0, 4.5: 0, 5.5: 0}
+            for x in h2h_matches:
+                for line in overs:
+                    if x.total_goals > line:
+                        overs[line] += 1
+            h2h_data = {
+                "total_matches": n,
+                "home_wins": a_wins,
+                "away_wins": b_wins,
+                "draws": draws,
+                "avg_total_goals": round(total_goals / n, 2) if n else 0,
+                "over_rates": {
+                    str(line): round(count / n, 2) if n else 0
+                    for line, count in overs.items()
+                },
+                "recent": [
+                    {
+                        "home": x.home,
+                        "away": x.away,
+                        "score": x.score_str(),
+                        "total_goals": x.total_goals,
+                        "start_time_fmt": _fmt_time(x.start_time),
+                    }
+                    for x in h2h_matches[:10]
+                ],
+            }
+
+        # 4. Picks on this match
+        pick_rows = conn.execute(
+            "SELECT * FROM picks WHERE match_id = ?", (match_id,)
+        ).fetchall()
+        picks = [_pick_to_response(db._row_to_pick(r)) for r in pick_rows]
+
+        # 5. Recommendation — build from available trend data
+        recommendation = None
+        if home_form_data and away_form_data:
+            # Compare stats to generate a recommendation
+            rec_lines = []
+            confidence_factors = []
+
+            # Over/Under analysis from combined player data
+            home_avg_goals = home_form_data.avg_total_goals
+            away_avg_goals = away_form_data.avg_total_goals
+            expected_goals = (home_avg_goals + away_avg_goals) / 2
+
+            # H2H avg goals factor
+            if h2h_data:
+                h2h_avg = h2h_data["avg_total_goals"]
+                expected_goals = (expected_goals + h2h_avg * 2) / 3  # H2H weighted double
+
+            # Find the best over/under line
+            for line in [2.5, 3.5, 4.5, 5.5]:
+                home_rate = getattr(home_form_data, f"over_{str(line).replace('.', '_')}_rate", 0)
+                away_rate = getattr(away_form_data, f"over_{str(line).replace('.', '_')}_rate", 0)
+                combined_rate = (home_rate + away_rate) / 2
+
+                h2h_rate = None
+                if h2h_data and str(line) in h2h_data["over_rates"]:
+                    h2h_rate = h2h_data["over_rates"][str(line)]
+                    combined_rate = (combined_rate + h2h_rate * 2) / 3
+
+                if combined_rate >= 0.70:
+                    rec_lines.append({
+                        "market": f"Over {line} Goals",
+                        "combined_rate": round(combined_rate, 2),
+                        "combined_rate_pct": f"{combined_rate:.0%}",
+                        "home_rate": round(home_rate, 2),
+                        "away_rate": round(away_rate, 2),
+                        "h2h_rate": round(h2h_rate, 2) if h2h_rate is not None else None,
+                    })
+
+                under_rate = 1.0 - combined_rate
+                if under_rate >= 0.70:
+                    rec_lines.append({
+                        "market": f"Under {line} Goals",
+                        "combined_rate": round(under_rate, 2),
+                        "combined_rate_pct": f"{under_rate:.0%}",
+                        "home_rate": round(1.0 - home_rate, 2),
+                        "away_rate": round(1.0 - away_rate, 2),
+                        "h2h_rate": round(1.0 - h2h_rate, 2) if h2h_rate is not None else None,
+                    })
+
+            # Sort by combined rate descending
+            rec_lines.sort(key=lambda x: x["combined_rate"], reverse=True)
+
+            # Moneyline recommendation
+            ml_rec = None
+            if h2h_data and h2h_data["total_matches"] >= 5:
+                total_h2h = h2h_data["total_matches"]
+                hw = h2h_data["home_wins"]
+                aw = h2h_data["away_wins"]
+                dr = h2h_data["draws"]
+
+                home_wr = home_form_data.recent_win_rate
+                away_wr = away_form_data.recent_win_rate
+
+                if hw / total_h2h >= 0.60 and home_wr >= 0.40:
+                    ml_rec = {
+                        "side": home_handle,
+                        "h2h_rate_pct": f"{hw / total_h2h:.0%}",
+                        "recent_form_pct": f"{home_wr:.0%}",
+                    }
+                elif aw / total_h2h >= 0.60 and away_wr >= 0.40:
+                    ml_rec = {
+                        "side": away_handle,
+                        "h2h_rate_pct": f"{aw / total_h2h:.0%}",
+                        "recent_form_pct": f"{away_wr:.0%}",
+                    }
+
+            recommendation = {
+                "expected_goals": round(expected_goals, 1),
+                "best_lines": rec_lines[:3],
+                "moneyline": ml_rec,
+                "home_tier": home_form_data.tier.label,
+                "away_tier": away_form_data.tier.label,
+                "home_trend": home_form_data.form_trend,
+                "away_trend": away_form_data.form_trend,
+            }
+
+        return MatchDetailResponse(
+            match=match_resp,
+            home_form=home_resp,
+            away_form=away_resp,
+            h2h=h2h_data,
+            picks=picks,
+            recommendation=recommendation,
+        )
+    finally:
+        db.close()
+
+
+def _form_to_response(form: PlayerForm) -> PlayerResponse:
+    """Convert a PlayerForm to a PlayerResponse."""
+    return PlayerResponse(
+        handle=form.handle,
+        league=league_display_name(form.league_id),
+        league_id=form.league_id,
+        tier=form.tier.label,
+        form_trend=form.form_trend,
+        form_modifier=round(form.form_modifier, 2),
+        matches_played=form.matches_played,
+        wins=form.wins,
+        losses=form.losses,
+        draws=form.draws,
+        win_rate=round(form.win_rate, 4),
+        win_rate_pct=f"{form.win_rate:.1%}",
+        goals_scored=form.goals_scored,
+        goals_conceded=form.goals_conceded,
+        avg_goals_scored=round(form.avg_goals_scored, 2),
+        avg_goals_conceded=round(form.avg_goals_conceded, 2),
+        avg_total_goals=round(form.avg_total_goals, 2),
+        over_rates={
+            "2.5": round(form.over_2_5_rate, 4),
+            "3.5": round(form.over_3_5_rate, 4),
+            "4.5": round(form.over_4_5_rate, 4),
+            "5.5": round(form.over_5_5_rate, 4),
+        },
+        recent={
+            "matches": form.recent_matches,
+            "wins": form.recent_wins,
+            "losses": form.recent_losses,
+            "draws": form.recent_draws,
+            "win_rate": round(form.recent_win_rate, 4),
+            "win_rate_pct": f"{form.recent_win_rate:.1%}",
+            "goals_scored": form.recent_goals_scored,
+            "goals_conceded": form.recent_goals_conceded,
+            "avg_goals_scored": round(form.recent_avg_goals_scored, 2),
+            "avg_goals_conceded": round(form.recent_avg_goals_conceded, 2),
+        },
+    )
 
 
 @app.get("/api/scan/status", response_model=ScanStatusResponse)

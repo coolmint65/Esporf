@@ -113,6 +113,7 @@ class EsporfDiscordBot(discord.Client):
         self._alert_channel: discord.TextChannel | None = None
         self._scan_count = 0
         self._latest_reports: list[MatchupReport] = []
+        self._discord_sent_keys: set[str] = set()
 
     # ── Lifecycle ─────────────────────────────────────────────
 
@@ -183,7 +184,13 @@ class EsporfDiscordBot(discord.Client):
     # ── Alert delivery ────────────────────────────────────────
 
     async def _send_alerts(self, reports: list[MatchupReport]) -> None:
-        """Send new odds-backed picks to the alert channel."""
+        """Send new odds-backed picks to the alert channel.
+
+        Dedup and DB recording are already handled by scan_once() in
+        bot.py via _alerted_keys.  This method only needs to track which
+        picks have been *sent to Discord* so it doesn't re-post on the
+        same scan cycle.
+        """
         if not self._alert_channel:
             return
 
@@ -196,11 +203,8 @@ class EsporfDiscordBot(discord.Client):
             if report.best_bet is None or report.match.league_id not in tracked:
                 continue
 
-            # Check dedup inside the loop so earlier sends in this batch
-            # are caught — the old list-comprehension filter evaluated all
-            # items at once, letting duplicate matches through.
             key = _match_key(report.match)
-            if key in self.scanner._alerted_keys:
+            if key in self._discord_sent_keys:
                 continue
 
             embed_data = _build_discord_embed(report)
@@ -218,15 +222,11 @@ class EsporfDiscordBot(discord.Client):
                 content = f"<@&{settings.discord_role_id}>"
 
             try:
-                # Add to alerted set BEFORE sending so even if the send
-                # is slow, a concurrent scan won't duplicate it.
-                self.scanner._alerted_keys.add(key)
+                self._discord_sent_keys.add(key)
                 await self._alert_channel.send(content=content or None, embed=embed)
-                self.scanner.record_pick(report)
                 logger.info("Alert sent for %s", report.match.display_name)
             except Exception as e:
-                # Remove from alerted set so it can be retried next cycle
-                self.scanner._alerted_keys.discard(key)
+                self._discord_sent_keys.discard(key)
                 logger.warning("Failed to send alert: %s", e)
 
     # ── Cleanup ───────────────────────────────────────────────

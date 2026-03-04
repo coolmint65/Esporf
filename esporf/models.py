@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import cached_property
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from esporf.analysis.feedback import FeedbackAnalyzer
+
+logger = logging.getLogger(__name__)
 
 _HANDLE_RE = re.compile(r"\(([^)]+)\)\s*$")
 
@@ -208,6 +215,7 @@ class PickResult(Enum):
     WIN = "win"
     LOSS = "loss"
     PUSH = "push"
+    VOID = "void"
 
 
 @dataclass
@@ -238,7 +246,7 @@ class TrackedPick:
 
     @property
     def is_resolved(self) -> bool:
-        return self.result != PickResult.PENDING
+        return self.result not in (PickResult.PENDING,)
 
     @property
     def result_emoji(self) -> str:
@@ -247,6 +255,7 @@ class TrackedPick:
             PickResult.LOSS: "\u274c",
             PickResult.PUSH: "\u2796",
             PickResult.PENDING: "\u23f3",
+            PickResult.VOID: "\u26d4",
         }[self.result]
 
     @property
@@ -477,7 +486,7 @@ class PlayerTier(Enum):
     @property
     def base_modifier(self) -> float:
         return {
-            PlayerTier.ELITE: 1.15,
+            PlayerTier.ELITE: 1.08,
             PlayerTier.SOLID: 1.00,
             PlayerTier.WATCHLIST: 0.85,
             PlayerTier.BLOCKED: 0.00,
@@ -582,9 +591,9 @@ class BetPick:
 
     @property
     def confidence_label(self) -> str:
-        if self.confidence >= 0.90:
+        if self.confidence >= 0.93:
             return "Very High"
-        if self.confidence >= 0.80:
+        if self.confidence >= 0.85:
             return "High"
         if self.confidence >= 0.75:
             return "Moderate"
@@ -659,34 +668,37 @@ class BetPick:
 
     @property
     def is_heavy_juice(self) -> bool:
-        """True if odds are -200 or worse (heavy favorite, low payout)."""
+        """True if odds are -150 or worse (heavy favorite, low payout)."""
         dec = self.decimal_odds
-        return dec is not None and dec < 1.50
+        return dec is not None and dec < 1.667
 
     @property
     def units(self) -> float:
-        """Recommended unit size derived directly from confidence score.
+        """Recommended unit size — high units are reserved for true hammers.
 
-        Sharp tiers — big units only on the highest-conviction plays.
-        Heavy juice (odds worse than -200) caps sizing at 1.5u regardless
-        of confidence, since the payout doesn't justify the exposure.
+        Beyond the composite confidence score, 2u and 3u plays must also
+        pass hard gates on edge, trend agreement, and hit rate.  This
+        prevents a single strong signal from inflating unit size.
         """
         c = self.confidence
+        n_trends = len(self.supporting_trends)
+        avg_rate = (
+            sum(t.hit_rate for t in self.supporting_trends) / n_trends
+            if n_trends
+            else 0.0
+        )
+        edge = self.edge or 0.0
 
-        if c >= 0.90:
-            u = 3.0
-        elif c >= 0.80:
-            u = 2.0
-        elif c >= 0.75:
-            u = 1.5
-        else:
-            u = 1.0
+        # 3u — the ultimate hammer: everything must line up
+        if c >= 0.93 and edge >= 0.15 and n_trends >= 4 and avg_rate >= 0.80:
+            return 3.0
 
-        # Heavy juice cap — don't overexpose on bad payout
-        if self.is_heavy_juice:
-            u = min(u, 1.5)
+        # 2u — strong conviction: high score AND solid underlying data
+        if c >= 0.85 and edge >= 0.12 and n_trends >= 3 and avg_rate >= 0.78:
+            return 2.0
 
-        return u
+        # Everything else is 1u — still a recommended play, just standard size
+        return 1.0
 
     @property
     def units_display(self) -> str:
@@ -706,21 +718,25 @@ class MatchupReport:
     avg_goals: float | None = None  # match-specific expected total goals
     form_modifier: float = 1.0  # combined form quality of both players
     skip_reason: str | None = None  # set when a player is BLOCKED or skipped
+    feedback_analyzer: FeedbackAnalyzer | None = None
 
     @property
     def has_trends(self) -> bool:
         return len(self.trends) > 0
 
-    @property
+    @cached_property
     def best_bet(self) -> BetPick | None:
         """Pick the single best bet from qualifying trends.
+
+        Cached so repeated access (filtering, recording, alerting) returns
+        the same BetPick instance without re-running the scoring algorithm.
 
         When real odds are available (from BetsAPI), we:
         1. Only consider lines actually offered by the sportsbook
         2. Use real implied probability instead of estimates
         3. Score by edge (hit_rate - implied_probability) for maximum value
 
-        When no odds are available, falls back to the tightest-line heuristic.
+        When no odds are available, returns None (sportsbook odds required).
         """
         if not self.trends:
             return None
@@ -750,10 +766,13 @@ class MatchupReport:
         not just edge. A +130 line with 20% edge is far more valuable than
         a -240 line with 10% edge.
 
-        Minimum 5% edge required — smaller edges get eaten by vig/variance.
-        Heavy juice (> -200) is penalized in scoring since the payout is poor.
+        Minimum 8% edge required — smaller edges get eaten by vig/variance.
+        At least 2 trends must agree on a market to recommend it.
+        Max juice is -150 (decimal 1.667) — anything worse is rejected.
         """
-        MIN_EDGE = 0.05  # 5% minimum edge to recommend
+        MIN_EDGE = 0.12  # 12% minimum edge to recommend (up from 8%)
+        MAX_JUICE_ODDS = 1.667  # -150 American; reject anything below
+        MIN_REAL_TRENDS = 3  # minimum real (non-synthetic) trends backing a pick
 
         best_market: str | None = None
         best_score = 0.0
@@ -769,7 +788,20 @@ class MatchupReport:
             parsed = _parse_line(market)
             parsed_spread = _parse_spread(market)
             agreement = len(trends)
-            avg_rate = sum(t.hit_rate for t in trends) / agreement
+            # Count only real trends (sample_size >= 5) toward agreement;
+            # synthetic signals like Forebet (sample_size=1) can boost
+            # confidence but shouldn't meet the threshold on their own.
+            real_trends = [t for t in trends if t.sample_size >= 5]
+            if len(real_trends) < MIN_REAL_TRENDS:
+                continue  # need at least 3 real trends backing a pick
+            # Weight avg_rate by sample size so large-sample trends
+            # contribute more than small-sample or synthetic ones.
+            total_weight = sum(t.sample_size for t in trends)
+            avg_rate = (
+                sum(t.hit_rate * t.sample_size for t in trends) / total_weight
+                if total_weight > 0
+                else 0.0
+            )
             avg_sample = sum(t.sample_size for t in trends) / agreement
 
             if parsed:
@@ -778,12 +810,25 @@ class MatchupReport:
                 if not odds_line:
                     continue  # line not offered by the book — skip it
 
+                # Reject phantom lines: Over/Under picks too far from the
+                # expected total are near-guaranteed hits with garbage odds
+                # (e.g. Over 2.5 when avg_goals is 7.0).  These inflate
+                # P/L without representing real bettable value.
+                if self.avg_goals and self.avg_goals > 0:
+                    if direction.lower() == "over" and line < self.avg_goals - 3.0:
+                        continue
+                    if direction.lower() == "under" and line > self.avg_goals + 3.0:
+                        continue
+
                 if direction.lower() == "over":
                     implied = odds_line.over_implied
                     dec_odds = odds_line.over_odds
                 else:
                     implied = odds_line.under_implied
                     dec_odds = odds_line.under_odds
+
+                if dec_odds < MAX_JUICE_ODDS:
+                    continue  # juice worse than -150 — payout too low
 
                 edge = avg_rate - implied
                 if edge < MIN_EDGE:
@@ -798,19 +843,11 @@ class MatchupReport:
                 ev_norm = min(max(ev_per_unit, 0.0) / 0.50, 1.0)
                 edge_norm = min(edge / 0.30, 1.0)
 
-                # Penalize heavy juice — even with edge, payout is poor
-                juice_penalty = 0.0
-                if dec_odds < 1.50:  # worse than -200
-                    juice_penalty = 0.15
-                elif dec_odds < 1.67:  # worse than -150
-                    juice_penalty = 0.05
-
                 score = (
                     ev_norm * 0.35
                     + edge_norm * 0.25
                     + min(agreement / 5, 1.0) * 0.20
                     + avg_rate * 0.20
-                    - juice_penalty
                 )
                 if score > best_score:
                     best_score = score
@@ -842,6 +879,9 @@ class MatchupReport:
                     implied = spread.away_implied
                     dec_odds = spread.away_odds
 
+                if dec_odds < MAX_JUICE_ODDS:
+                    continue  # juice worse than -150
+
                 edge = avg_rate - implied
                 if edge < MIN_EDGE:
                     continue
@@ -852,18 +892,11 @@ class MatchupReport:
                 ev_norm = min(max(ev_per_unit, 0.0) / 0.50, 1.0)
                 edge_norm = min(edge / 0.30, 1.0)
 
-                juice_penalty = 0.0
-                if dec_odds < 1.50:
-                    juice_penalty = 0.15
-                elif dec_odds < 1.67:
-                    juice_penalty = 0.05
-
                 score = (
                     ev_norm * 0.35
                     + edge_norm * 0.25
                     + min(agreement / 5, 1.0) * 0.20
                     + avg_rate * 0.20
-                    - juice_penalty
                 )
                 if score > best_score:
                     best_score = score
@@ -884,6 +917,9 @@ class MatchupReport:
                 implied = _get_moneyline_implied(market, ml, self.match)
                 if implied is None:
                     continue
+                ml_dec = _get_moneyline_dec_odds(market, ml, self.match)
+                if ml_dec is not None and ml_dec < MAX_JUICE_ODDS:
+                    continue  # juice worse than -150
                 edge = avg_rate - implied
                 if edge < MIN_EDGE:
                     continue
@@ -926,6 +962,10 @@ class MatchupReport:
                 odds_str = f" @ {best_spread.home_american}"
             else:
                 odds_str = f" @ {best_spread.away_american}"
+        elif best_ml and best_ml_side:
+            ml_dec = _ml_side_odds(best_ml, best_ml_side)
+            if ml_dec:
+                odds_str = f" @ {_decimal_to_american(ml_dec)}"
 
         reason = (
             f"{best_market}{odds_str} backed by {len(best_trends)} trend(s) "
@@ -935,6 +975,21 @@ class MatchupReport:
         # Apply form modifier — elite-form players boost confidence
         # (and unit sizing), poor-form players scale it down.
         adjusted_score = best_score * self.form_modifier
+
+        # Apply feedback penalty — learned from historical loss patterns.
+        # Penalizes markets/players/leagues that have been underperforming.
+        if self.feedback_analyzer is not None:
+            try:
+                feedback_penalty = self.feedback_analyzer.get_penalty(
+                    market=best_market,
+                    home=self.match.home,
+                    away=self.match.away,
+                    league_id=self.match.league_id,
+                    edge=best_edge,
+                )
+                adjusted_score *= feedback_penalty
+            except Exception:
+                logger.debug("Feedback penalty failed for %s", best_market, exc_info=True)
 
         return BetPick(
             market=best_market,
@@ -1064,6 +1119,25 @@ def _get_moneyline_implied(
                 return implied
         # If we can't match the player, skip
         return None
+    return None
+
+
+def _get_moneyline_dec_odds(
+    market: str, ml: MoneylineOdds, match: UpcomingMatch
+) -> float | None:
+    """Get the decimal odds for a moneyline market."""
+    market_lower = market.lower()
+    if "draw" in market_lower:
+        return ml.draw_odds
+    if "win" in market_lower:
+        for player, dec in [
+            (match.home, ml.home_odds),
+            (match.away, ml.away_odds),
+        ]:
+            if extract_handle(player).lower() in market_lower:
+                return dec
+            if player.lower() in market_lower:
+                return dec
     return None
 
 

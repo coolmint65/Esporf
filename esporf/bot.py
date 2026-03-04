@@ -23,6 +23,7 @@ from datetime import datetime
 from rich.console import Console
 
 from esporf.alerts.console import display_matchup_report, display_reports_by_league, display_scan_summary
+from esporf.analysis.feedback import FeedbackAnalyzer
 from esporf.analysis.trends import TrendAnalyzer
 from esporf.config import settings
 from esporf.database import MatchDatabase
@@ -45,7 +46,7 @@ from esporf.sources.bwin import BwinClient
 from esporf.sources.esportsbattle import ESportsBattleClient
 from esporf.sources.fanduel import FanDuelClient
 from esporf.sources.forebet import ForebetClient
-from esporf.sources.hudstats import HUDstatsClient
+from esporf.sources.hudstats import HUDstatsClient, LiveScore
 from esporf.sources.kambi import KambiClient
 from esporf.sources.totalcorner import TotalCornerClient
 
@@ -86,9 +87,12 @@ class EsporfBot:
         self.forebet = ForebetClient()
         self.db = MatchDatabase()
         self.analyzer = TrendAnalyzer(self.db)
+        self.feedback = FeedbackAnalyzer(self.db)
+        self.feedback.load_from_db()  # restore learned adjustments across restarts
         self._running = False
         self._scan_count = 0
         self._alerted_keys: set[str] = set()
+        self._prev_hudstats_live: dict[str, LiveScore] = {}
         self._load_alerted_keys()
 
     # ── Name enrichment ──────────────────────────────────────────
@@ -130,6 +134,52 @@ class EsporfBot:
         if enriched:
             logger.info("Enriched %d bare handle(s) with team names from DB", enriched)
 
+    # ── HUDstats score harvesting ─────────────────────────────────
+
+    def _harvest_hudstats_results(self) -> int:
+        """Detect finished GG League matches by comparing live score snapshots.
+
+        Each scan cycle, HUDstats returns currently-live matches with scores.
+        When a match that was live in the previous cycle disappears from the
+        current live feed, it has finished.  We create a MatchResult from the
+        last known scores and insert it into the DB so the pick resolver can
+        grade it normally.
+
+        Returns the number of results harvested.
+        """
+        current = self.hudstats.live_scores
+        prev = self._prev_hudstats_live
+        self._prev_hudstats_live = dict(current)  # snapshot for next cycle
+
+        if not prev:
+            return 0  # first cycle — nothing to compare against
+
+        harvested = 0
+        for match_id, score in prev.items():
+            if match_id in current:
+                continue  # still live — update will happen next cycle
+
+            # Match was live last cycle but is gone now → finished
+            result = MatchResult(
+                match_id=match_id,
+                league_id=score.league_id,
+                home=score.home,
+                away=score.away,
+                home_score=score.home_score,
+                away_score=score.away_score,
+                start_time=score.start_time,
+            )
+            added = self.db.insert_many([result])
+            if added:
+                harvested += 1
+                logger.info(
+                    "Harvested GG League result: %s %d-%d %s [%s]",
+                    score.home, score.home_score, score.away_score,
+                    score.away, match_id,
+                )
+
+        return harvested
+
     # ── Pick tracking ────────────────────────────────────────────
 
     def _load_alerted_keys(self) -> None:
@@ -159,6 +209,30 @@ class EsporfBot:
         if not pick:
             return None
 
+        # Guard: reject O/U picks for lines not in the match's actual odds.
+        # Different odds sources can merge lines from different books, leading
+        # to phantom picks like "Over 2.5" when the primary book starts at 5.5.
+        odds = report.match.odds
+        parsed = _parse_line(pick.market)
+        if parsed and odds and odds.has_data:
+            direction, line = parsed
+            if not odds.get_line(line):
+                logger.warning(
+                    "Rejected pick — line %.1f not in current odds (%s): %s %s",
+                    line, odds.available_lines,
+                    report.match.display_name, pick.market,
+                )
+                return None
+
+        # Resolve decimal odds — fall back to ML side lookup if property
+        # returns None (can happen when _ml_side isn't set on the BetPick).
+        dec_odds = pick.decimal_odds
+        if dec_odds is None and pick.moneyline and report.match.odds:
+            from esporf.models import _get_moneyline_dec_odds
+            dec_odds = _get_moneyline_dec_odds(
+                pick.market, pick.moneyline, report.match,
+            )
+
         tracked = TrackedPick(
             match_id=report.match.match_id,
             league_id=report.match.league_id,
@@ -167,7 +241,7 @@ class EsporfBot:
             start_time=report.match.start_time,
             market=pick.market,
             units=pick.units,
-            odds=pick.decimal_odds,
+            odds=dec_odds,
             hit_rate=max(t.hit_rate for t in pick.supporting_trends),
             edge=pick.edge,
             created_at=int(time.time()),
@@ -183,14 +257,16 @@ class EsporfBot:
     async def resolve_pending_picks(self) -> list[TrackedPick]:
         """Check pending picks against completed match results and resolve them.
 
-        Two-pass approach:
+        Three-pass approach:
         1. Fast pass — look up each pick in the local DB (direct match_id
            then H2H name+time).
-        2. Stale-pick pass — for picks whose match should have ended by now
-           (start_time + 20 min < now), fetch fresh ended matches from
-           BetsAPI for the relevant league(s) and re-attempt the lookup.
-           This catches picks stored with ace_/esb_ IDs that never got
-           cross-referenced to a BetsAPI numeric ID.
+        2. Targeted pass — for stale picks (match should have ended by now):
+           a) Picks with numeric BetsAPI IDs: directly query the event by ID
+              via ``/v1/event/view`` for an immediate, reliable result.
+           b) All stale picks: fetch 2 pages of recently ended matches per
+              league and re-attempt the DB lookup.
+        3. Void pass — picks stuck for >3 hours get voided (result never
+           coming back).
         """
         pending = self.db.get_pending_picks()
         if not pending:
@@ -208,42 +284,98 @@ class EsporfBot:
             else:
                 still_pending.append(pick)
 
-        # ── Pass 2: fetch fresh ended matches for stale picks ────────
+        # ── Pass 2: targeted lookups for stale picks ─────────────────
         # eSoccer matches last 8-12 min; 20 min buffer is generous.
         _STALE_THRESHOLD = 20 * 60  # seconds
         stale = [p for p in still_pending if (now - p.start_time) > _STALE_THRESHOLD]
 
         if stale:
-            # Determine which leagues need a fresh ended-match fetch
-            stale_leagues = {p.league_id for p in stale}
-            for lid in stale_leagues:
+            # 2a. Direct event view for picks with numeric BetsAPI IDs —
+            #     most reliable, one API call per pick, gets the exact result.
+            direct_resolved: set[int] = set()
+            for pick in stale:
+                if pick.match_id.startswith(("esb_", "ace_", "hudstats_", "kambi_", "bwin_")):
+                    continue  # non-BetsAPI ID, skip direct lookup
                 try:
-                    ended = await self.api.get_ended_matches(lid, page=1)
-                    added = self.db.insert_many(ended)
-                    if added:
+                    result = await self.api.get_event_result(pick.match_id)
+                    if result is not None:
+                        self.db.insert_many([result])
+                        self._resolve_one(pick, result, now, resolved)
+                        direct_resolved.add(pick.id)
                         logger.info(
-                            "Stale-pick resolver: added %d ended results for league %d",
-                            added, lid,
+                            "Direct event view resolved pick #%d: %s",
+                            pick.id, pick.match_id,
                         )
                 except Exception as e:
-                    logger.warning(
-                        "Stale-pick resolver: failed to fetch ended for league %d: %s",
-                        lid, e,
+                    logger.debug(
+                        "Direct event view failed for pick #%d (%s): %s",
+                        pick.id, pick.match_id, e,
                     )
 
-            # Re-attempt resolution with the freshly-inserted results
-            for pick in stale:
-                result_match = self._find_match_result(pick)
-                if result_match is not None:
-                    self._resolve_one(pick, result_match, now, resolved)
-                else:
-                    age_min = (now - pick.start_time) // 60
-                    logger.warning(
-                        "Pick #%d still unresolved (%d min old): %s vs %s [%s]",
-                        pick.id, age_min,
-                        extract_handle(pick.home), extract_handle(pick.away),
-                        pick.match_id,
-                    )
+            # Remove directly resolved picks from the stale list
+            stale = [p for p in stale if p.id not in direct_resolved]
+
+            # 2b. Bulk fetch ended matches (3 pages) for remaining stale picks
+            if stale:
+                stale_leagues = {p.league_id for p in stale}
+                for lid in stale_leagues:
+                    for page in (1, 2, 3):
+                        try:
+                            ended = await self.api.get_ended_matches(lid, page=page)
+                            added = self.db.insert_many(ended)
+                            if added:
+                                logger.info(
+                                    "Stale-pick resolver: added %d ended results "
+                                    "for league %d (page %d)",
+                                    added, lid, page,
+                                )
+                        except Exception as e:
+                            logger.warning(
+                                "Stale-pick resolver: failed to fetch ended "
+                                "for league %d page %d: %s",
+                                lid, page, e,
+                            )
+
+                # Re-attempt resolution with the freshly-inserted results
+                for pick in stale:
+                    result_match = self._find_match_result(pick)
+                    if result_match is not None:
+                        self._resolve_one(pick, result_match, now, resolved)
+                    else:
+                        age_min = (now - pick.start_time) // 60
+                        logger.warning(
+                            "Pick #%d still unresolved (%d min old): %s vs %s [%s]",
+                            pick.id, age_min,
+                            extract_handle(pick.home), extract_handle(pick.away),
+                            pick.match_id,
+                        )
+
+        # ── Pass 3: void ancient pending picks ────────────────────
+        # eSoccer matches last 8-12 min. If a pick is still pending
+        # after 3 hours the result is never coming back — void it so
+        # it doesn't sit in the live-picks list forever.
+        _VOID_THRESHOLD = 3 * 3600  # 3 hours
+        voided = 0
+        for pick in self.db.get_pending_picks():
+            if (now - pick.start_time) > _VOID_THRESHOLD:
+                self.db.resolve_pick(
+                    pick_id=pick.id,
+                    result=PickResult.VOID,
+                    profit=0.0,
+                    home_score=pick.home_score or 0,
+                    away_score=pick.away_score or 0,
+                    resolved_at=now,
+                )
+                voided += 1
+                logger.info(
+                    "Voided stale pick #%d (%.1fh old): %s vs %s",
+                    pick.id, (now - pick.start_time) / 3600,
+                    extract_handle(pick.home), extract_handle(pick.away),
+                )
+        if voided:
+            console.print(
+                f"  [dim]Voided {voided} stale pick(s) (>3h old)[/dim]"
+            )
 
         if resolved:
             console.print(
@@ -299,9 +431,11 @@ class EsporfBot:
         #    _handle_patterns builds both bare and parenthesized LIKE patterns
         #    so lookups work regardless of name format differences between
         #    sources (e.g. Kambi bare "ALPHA" vs BetsAPI "Chelsea (ALPHA)").
+        #    600s tolerance (up from 300s) because HUDstats, Kambi, and BetsAPI
+        #    can report start times several minutes apart for the same match.
         h2h = self.db.get_h2h_matches(pick.home, pick.away, limit=10)
         for match in h2h:
-            if abs(match.start_time - pick.start_time) <= 300:
+            if abs(match.start_time - pick.start_time) <= 600:
                 return match
         return None
 
@@ -490,11 +624,25 @@ class EsporfBot:
             except Exception as e:
                 logger.warning("Failed to fetch ended matches for league %d: %s", lid, e)
 
+        # Harvest finished GG League matches from live score snapshots
+        # BEFORE resolving picks — ensures freshly-finished matches are
+        # available as MatchResults for the pick resolver this cycle.
+        harvested = self._harvest_hudstats_results()
+        if harvested:
+            console.print(
+                f"  [dim]Harvested {harvested} GG League result(s) from HUDstats[/dim]"
+            )
+
         # Refresh player form stats with the new results
         self.db.rebuild_player_form(settings.tracked_league_ids)
 
         # Resolve any pending picks now that we have fresh results
-        await self.resolve_pending_picks()
+        resolved_picks = await self.resolve_pending_picks()
+
+        # Recompute feedback adjustments when picks resolve — the bot learns
+        # from wins/losses and adjusts confidence scoring for future picks.
+        if resolved_picks:
+            self.feedback.compute_adjustments()
 
         # Fetch external data (TotalCorner + Forebet) in parallel
         await self._fetch_external_data()
@@ -560,6 +708,10 @@ class EsporfBot:
         except Exception as e:
             logger.warning("HUDstats schedule failed: %s", e)
 
+        # Note: HUDstats result harvesting was already run above (before
+        # resolve_pending_picks) to ensure finished matches are captured
+        # as MatchResults before the pick resolver processes them.
+
         # 2.6. bwin: Volta schedule + odds (has pre-match odds well before kickoff)
         # bwin returns matches WITH odds pre-attached. If AceOdds/ESportsBattle
         # already added the same match (without odds), merge the odds in.
@@ -584,6 +736,8 @@ class EsporfBot:
             logger.warning("bwin Volta schedule failed: %s", e)
 
         # 3. Kambi: schedule + odds in one shot (GG League, GT Leagues)
+        # If HUDstats already added a GG League match (without odds),
+        # merge the Kambi odds in — same pattern as bwin for Volta.
         kambi_league_ids: set[int] = set()
         try:
             kambi_matches = await self.kambi.get_schedule(settings.tracked_league_ids)
@@ -594,13 +748,22 @@ class EsporfBot:
                     seen_keys.add(key)
                     key_to_idx[key] = len(all_upcoming)
                     all_upcoming.append(m)
+                elif key in key_to_idx and m.odds and m.odds.has_data:
+                    # Match already exists from HUDstats — transfer Kambi odds
+                    existing = all_upcoming[key_to_idx[key]]
+                    if not (existing.odds and existing.odds.has_data):
+                        existing.odds = m.odds
+                        logger.info(
+                            "Merged Kambi odds into %s", existing.display_name,
+                        )
         except Exception as e:
             logger.warning("Kambi schedule failed: %s", e)
 
-        # 4. Supplementary: BetsAPI (leagues not covered by Kambi)
+        # 4. Supplementary: BetsAPI for all leagues.  Even when Kambi
+        # already provided schedule + odds, we still need BetsAPI to
+        # cross-reference match IDs — picks with kambi_/hudstats_ IDs
+        # can't resolve results via direct BetsAPI event view.
         for lid in settings.tracked_league_ids:
-            if lid in kambi_league_ids:
-                continue  # Kambi already provided schedule + odds for this league
             try:
                 schedule = await self.api.get_full_schedule(lid)
                 for m in schedule:
@@ -627,12 +790,12 @@ class EsporfBot:
         # Match by player pair + approximate time (within 5 min) to fix this.
         still_unresolved = [
             (i, m) for i, m in enumerate(all_upcoming)
-            if m.match_id.startswith(("esb_", "ace_", "hudstats_"))
+            if m.match_id.startswith(("esb_", "ace_", "hudstats_", "kambi_"))
         ]
         if still_unresolved:
             betsapi_lookup: dict[tuple[str, str], list[tuple[int, UpcomingMatch]]] = {}
             for i, m in enumerate(all_upcoming):
-                if m.match_id.startswith(("esb_", "ace_", "hudstats_")):
+                if m.match_id.startswith(("esb_", "ace_", "hudstats_", "kambi_")):
                     continue
                 h = extract_handle(m.home).lower()
                 a = extract_handle(m.away).lower()
@@ -703,6 +866,10 @@ class EsporfBot:
         # like "Senya" — look up their last known team from the DB.
         self._enrich_team_names(all_upcoming)
 
+        # Persist upcoming matches so the /api/schedule endpoint can
+        # show them alongside completed results.
+        self.db.save_upcoming(all_upcoming)
+
         # Keep matches starting within lookahead window
         lookahead = settings.schedule_lookahead
         imminent = [m for m in all_upcoming if m.starts_within(lookahead)]
@@ -731,7 +898,7 @@ class EsporfBot:
         # so a quick re-check here can catch matches that just appeared.
         still_unresolved = [
             m for m in all_upcoming
-            if m.match_id.startswith(("esb_", "ace_", "hudstats_"))
+            if m.match_id.startswith(("esb_", "ace_", "hudstats_", "kambi_"))
         ]
         if still_unresolved:
             console.print(
@@ -740,10 +907,8 @@ class EsporfBot:
             )
             try:
                 fresh: list[UpcomingMatch] = []
-                # Only query BetsAPI for leagues not covered by Kambi
+                # Query BetsAPI for all leagues to cross-reference IDs
                 for lid in settings.tracked_league_ids:
-                    if lid in kambi_league_ids:
-                        continue
                     fresh.extend(await self.api.get_inplay_matches(lid))
                     fresh.extend(await self.api.get_upcoming_matches(lid))
 
@@ -961,6 +1126,8 @@ class EsporfBot:
             report = self.analyzer.analyze_matchup(
                 match, tc_stats=tc_stats, forebet_pred=forebet_pred
             )
+            # Attach feedback analyzer so best_bet() can apply learned penalties
+            report.feedback_analyzer = self.feedback
             reports.append(report)
 
         # Log diagnostic for non-Volta leagues — surface why picks are/aren't generated
@@ -1058,6 +1225,11 @@ class EsporfBot:
                 f"Recommended: 180s. Update POLL_INTERVAL in your .env file.[/bold yellow]\n"
             )
 
+        feedback_status = (
+            f"[bold green]{len(self.feedback.adjustments)} adjustment(s) loaded[/bold green]"
+            if self.feedback.has_data
+            else "[dim]no history yet[/dim]"
+        )
         console.print(
             f"[bold blue]Esporf Odds Bot Starting[/bold blue]\n"
             f"  Tracking leagues: {settings.league_ids}\n"
@@ -1066,6 +1238,7 @@ class EsporfBot:
             f"  External: [bold cyan]TotalCorner[/bold cyan] + Forebet\n"
             f"  Odds: BetsAPI (bet365) + [bold cyan]Kambi[/bold cyan] + [bold green]bwin[/bold green] (Volta) + [bold cyan]FanDuel[/bold cyan]\n"
             f"  Mode: [bold green]Sportsbook odds only[/bold green] (no trend-only picks)\n"
+            f"  Feedback: {feedback_status} (learns from losses)\n"
             f"  Min hit rate: {settings.min_hit_rate:.0%}\n"
             f"  Min sample size: {settings.min_sample_size}\n"
             f"  Press Ctrl+C to stop\n"
@@ -1073,6 +1246,16 @@ class EsporfBot:
 
         # Backfill history on startup
         await self.backfill()
+
+        # Compute feedback adjustments from historical picks
+        self.feedback.compute_adjustments()
+        if self.feedback.has_data:
+            penalties = sum(1 for a in self.feedback.adjustments.values() if a.penalty < 0.95)
+            boosts = sum(1 for a in self.feedback.adjustments.values() if a.penalty > 1.05)
+            console.print(
+                f"  [dim]Feedback engine: {len(self.feedback.adjustments)} adjustments "
+                f"({penalties} penalties, {boosts} boosts)[/dim]\n"
+            )
 
         # Set up signal handlers (add_signal_handler is not supported on Windows)
         if os.name != "nt":

@@ -1,35 +1,34 @@
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts'
+import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, CartesianGrid, ComposedChart, Area } from 'recharts'
 import { api } from '../lib/api'
 import StatCard from '../components/StatCard'
 import Card from '../components/Card'
 import Badge from '../components/Badge'
 import { Table, Th, Td } from '../components/Table'
 import { Loading, Empty } from '../components/Empty'
+import Kickoff from '../components/Kickoff'
 
 const COLORS = { win: '#22c55e', loss: '#ef4444', push: '#f59e0b' }
 
-function Kickoff({ startTime }) {
-  const now = Math.floor(Date.now() / 1000)
-  const diff = startTime - now
-  if (diff <= 0) return <span className="text-win text-xs font-medium">LIVE</span>
-  const mins = Math.floor(diff / 60)
-  if (mins < 60) return <span className="text-xs text-muted">{mins}m</span>
-  const hrs = Math.floor(mins / 60)
-  const rem = mins % 60
-  return <span className="text-xs text-muted">{hrs}h{rem > 0 ? ` ${rem}m` : ''}</span>
-}
-
 export default function Dashboard() {
-  const { data: stats, isLoading: statsLoading } = useQuery({
-    queryKey: ['stats'],
-    queryFn: () => api.stats(),
+  const [chartDays, setChartDays] = useState(7)
+
+  const { data: daily, isLoading: dailyLoading } = useQuery({
+    queryKey: ['dailyStats'],
+    queryFn: api.dailyStats,
     refetchInterval: 60_000,
   })
 
   const { data: breakdown } = useQuery({
     queryKey: ['breakdown'],
     queryFn: api.breakdown,
+  })
+
+  const { data: chartData } = useQuery({
+    queryKey: ['statsChart', chartDays],
+    queryFn: () => api.statsChart({ days: chartDays }),
+    refetchInterval: 120_000,
   })
 
   const { data: live } = useQuery({
@@ -43,11 +42,16 @@ export default function Dashboard() {
     queryFn: () => api.recentMatches({ limit: 8 }),
   })
 
-  if (statsLoading) return <Loading />
+  if (dailyLoading) return <Loading />
 
-  const hasPicks = stats?.total_decided > 0
-  const profitColor = stats?.profit >= 0 ? 'green' : 'red'
-  const roiColor = stats?.roi != null && stats.roi >= 0 ? 'green' : stats?.roi != null ? 'red' : undefined
+  const today = daily?.today
+  const allTime = daily?.all_time
+  const hasPicks = allTime?.total_decided > 0
+  const hasToday = today?.total_decided > 0 || today?.pending > 0
+  const todayProfitColor = today?.profit >= 0 ? 'green' : 'red'
+  const allProfitColor = allTime?.profit >= 0 ? 'green' : 'red'
+  const todayRoiColor = today?.roi != null && today.roi >= 0 ? 'green' : today?.roi != null ? 'red' : undefined
+  const allRoiColor = allTime?.roi != null && allTime.roi >= 0 ? 'green' : allTime?.roi != null ? 'red' : undefined
 
   return (
     <div className="space-y-6">
@@ -56,35 +60,135 @@ export default function Dashboard() {
         <p className="text-sm text-muted mt-1">Performance overview</p>
       </div>
 
-      {/* Database stat cards — always visible */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
-        <StatCard label="Matches" value={stats?.total_matches?.toLocaleString() ?? '--'} sub="in database" color="blue" />
-        <StatCard label="Players" value={stats?.total_players ?? '--'} sub="tracked" />
-        <StatCard label="Avg Goals" value={stats?.avg_total_goals_display ?? '--'} sub="per match" />
-        {hasPicks ? (
-          <>
-            <StatCard label="Record" value={stats?.record ?? '--'} sub={`${stats?.total_decided ?? 0} decided`} />
-            <StatCard label="Profit" value={stats?.profit_display ?? '--'} sub={`${stats?.units_wagered ?? 0}u wagered`} color={profitColor} />
-          </>
-        ) : (
-          <>
-            <StatCard label="Record" value={stats?.record ?? '0-0'} sub="no picks yet" />
-            <StatCard label="Pending" value={stats?.pending ?? 0} sub="awaiting result" color="blue" />
-          </>
-        )}
+      {/* ── Today's Performance ───────────────────────────── */}
+      <div>
+        <h2 className="text-sm font-semibold text-muted uppercase tracking-wider mb-3">Today</h2>
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+          <StatCard
+            label="Record"
+            value={hasToday ? (today?.record ?? '0-0') : '0-0'}
+            sub={today?.total_decided > 0 ? `${today.total_decided} decided` : 'no picks decided'}
+          />
+          <StatCard
+            label="Profit / Loss"
+            value={hasToday && today?.total_decided > 0 ? today?.profit_display : '--'}
+            sub={today?.units_wagered > 0 ? `${today.units_wagered}u wagered` : ''}
+            color={today?.total_decided > 0 ? todayProfitColor : undefined}
+          />
+          <StatCard
+            label="Win Rate"
+            value={today?.total_decided > 0 ? today?.win_rate_pct : '--'}
+            sub={today?.total_decided > 0 ? `${today.wins}W / ${today.losses}L` : ''}
+          />
+          <StatCard
+            label="ROI"
+            value={today?.total_decided > 0 ? today?.roi_pct : '--'}
+            color={today?.total_decided > 0 ? todayRoiColor : undefined}
+          />
+          <StatCard
+            label="Pending"
+            value={today?.pending ?? 0}
+            sub="awaiting result"
+            color="blue"
+          />
+        </div>
       </div>
 
-      {/* Pick stats row — only when there are picks */}
+      {/* ── All-Time Performance ──────────────────────────── */}
       {hasPicks && (
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-          <StatCard label="Win Rate" value={stats?.win_rate_pct ?? '--'} sub={`${stats?.wins ?? 0}W / ${stats?.losses ?? 0}L`} />
-          <StatCard label="ROI" value={stats?.roi_pct ?? '--'} color={roiColor} />
-          <StatCard label="Units Wagered" value={`${stats?.units_wagered ?? 0}u`} />
-          <StatCard label="Pending" value={stats?.pending ?? 0} sub="awaiting result" color="blue" />
+        <div>
+          <h2 className="text-sm font-semibold text-muted uppercase tracking-wider mb-3">All Time</h2>
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+            <StatCard label="Record" value={allTime?.record ?? '--'} sub={`${allTime?.total_decided ?? 0} decided`} />
+            <StatCard label="Profit" value={allTime?.profit_display ?? '--'} sub={`${allTime?.units_wagered ?? 0}u wagered`} color={allProfitColor} />
+            <StatCard label="Win Rate" value={allTime?.win_rate_pct ?? '--'} sub={`${allTime?.wins ?? 0}W / ${allTime?.losses ?? 0}L`} />
+            <StatCard label="ROI" value={allTime?.roi_pct ?? '--'} color={allRoiColor} />
+            <StatCard label="Matches" value={allTime?.total_matches?.toLocaleString() ?? '--'} sub="in database" color="blue" />
+            <StatCard label="Avg Goals" value={allTime?.avg_total_goals_display ?? '--'} sub="per match" />
+          </div>
         </div>
       )}
 
-      {/* Charts */}
+      {/* ── Performance Chart ──────────────────────────────── */}
+      {hasPicks && (
+        <Card title="Daily Performance" icon iconColor="bg-win">
+          <div className="flex items-center gap-2 mb-4">
+            {[7, 14, 30].map((d) => (
+              <button
+                key={d}
+                onClick={() => setChartDays(d)}
+                className={`px-3 py-1 text-xs rounded-lg border transition-colors ${
+                  chartDays === d
+                    ? 'bg-accent text-white border-accent'
+                    : 'bg-surface2 text-muted border-border hover:border-accent/50'
+                }`}
+              >
+                {d}d
+              </button>
+            ))}
+          </div>
+          {chartData?.length > 0 ? (
+            <div className="h-64">
+              <ResponsiveContainer width="100%" height="100%">
+                <ComposedChart data={chartData} margin={{ top: 8, right: 8, bottom: 0, left: -12 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#2e3245" />
+                  <XAxis
+                    dataKey="date"
+                    tick={{ fill: '#8b90a5', fontSize: 11 }}
+                    axisLine={false}
+                    tickLine={false}
+                    tickFormatter={(d) => {
+                      const [, m, day] = d.split('-')
+                      return `${parseInt(m)}/${parseInt(day)}`
+                    }}
+                  />
+                  <YAxis
+                    yAxisId="left"
+                    tick={{ fill: '#8b90a5', fontSize: 11 }}
+                    axisLine={false}
+                    tickLine={false}
+                    tickFormatter={(v) => `${v >= 0 ? '+' : ''}${v}u`}
+                  />
+                  <YAxis
+                    yAxisId="right"
+                    orientation="right"
+                    tick={{ fill: '#8b90a5', fontSize: 11 }}
+                    axisLine={false}
+                    tickLine={false}
+                    tickFormatter={(v) => `${v >= 0 ? '+' : ''}${v}u`}
+                  />
+                  <Tooltip
+                    contentStyle={{ background: '#1a1d27', border: '1px solid #2e3245', borderRadius: 8, fontSize: 13 }}
+                    itemStyle={{ color: '#e1e4ed' }}
+                    labelStyle={{ color: '#8b90a5' }}
+                    formatter={(v, name) => [
+                      `${v >= 0 ? '+' : ''}${v}u`,
+                      name === 'profit' ? 'Daily P&L' : 'Cumulative',
+                    ]}
+                  />
+                  <Bar yAxisId="left" dataKey="profit" radius={[4, 4, 0, 0]} maxBarSize={32}>
+                    {chartData.map((entry, i) => (
+                      <Cell key={i} fill={entry.profit >= 0 ? '#22c55e' : '#ef4444'} fillOpacity={0.8} />
+                    ))}
+                  </Bar>
+                  <Line
+                    yAxisId="right"
+                    type="monotone"
+                    dataKey="cumulative"
+                    stroke="#3b82f6"
+                    strokeWidth={2}
+                    dot={false}
+                  />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+          ) : (
+            <Empty text="No data for this period" />
+          )}
+        </Card>
+      )}
+
+      {/* ── Charts Row ─────────────────────────────────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <Card title="Matches by League" icon iconColor="bg-accent">
           {breakdown?.by_league ? (
@@ -158,7 +262,7 @@ export default function Dashboard() {
         )}
       </div>
 
-      {/* Live picks + Recent matches */}
+      {/* ── Live Picks + Recent Results ────────────────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <Card title="Live Picks" icon iconColor="bg-win">
           {!live ? <Loading /> : live.length === 0 ? <Empty text="No pending picks" /> : (
@@ -223,7 +327,7 @@ export default function Dashboard() {
         </Card>
       </div>
 
-      {/* Confidence breakdown — only when picks exist */}
+      {/* ── Confidence Breakdown ───────────────────────────── */}
       {breakdown?.by_confidence?.length > 0 && (
         <Card title="By Confidence Tier" icon iconColor="bg-cyan">
           <Table>

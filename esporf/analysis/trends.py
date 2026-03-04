@@ -48,7 +48,8 @@ class TrendAnalyzer:
 
         Small samples need a higher bar (less confidence), while larger
         samples can accept a slightly lower rate (more statistically
-        reliable).  The adjustment is capped at +4% / -3% from the base.
+        reliable).  The adjustment is capped at +4% / -2% from the base,
+        with an absolute floor of 68%.
         """
         base = self.min_hit_rate
         if sample_size < 15:
@@ -56,10 +57,10 @@ class TrendAnalyzer:
             return base + 0.04
         if sample_size >= 30:
             # Large sample — statistically strong, can accept a bit less
-            return base - 0.03
-        # 15-29: linearly interpolate between base and base - 0.03
+            return base - 0.02
+        # 15-29: linearly interpolate between base and base - 0.02
         ratio = (sample_size - 15) / 15
-        return base - (0.03 * ratio)
+        return base - (0.02 * ratio)
 
     def _get_player_tier(self, player: str, league_id: int) -> tuple[PlayerTier, float]:
         """Evaluate a player's current tier and form modifier.

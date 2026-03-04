@@ -30,6 +30,62 @@ SPORT_ID = 1  # Soccer (eSoccer is categorized under soccer)
 # BetsAPI base URL without version prefix (for v1/v2 endpoints)
 _API_ROOT = "https://api.b365api.com"
 
+# ── Team name normalization ────────────────────────────────────────
+# BetsAPI sometimes returns city names instead of the canonical short
+# team names used by AceOdds / ESportsBattle / bet365.  This map
+# fixes the most common mismatches (primarily Bundesliga).
+_TEAM_ALIASES: dict[str, str] = {
+    "Leverkusen": "Bayer 04",
+    "B Leverkusen": "Bayer 04",
+    "Bayer Leverkusen": "Bayer 04",
+    "Frankfurt": "Eintracht",
+    "E Frankfurt": "Eintracht",
+    "Eintracht Frankfurt": "Eintracht",
+    "Munich": "Bayern",
+    "Bayern Munich": "Bayern",
+    "Bayern München": "Bayern",
+    "München": "Bayern",
+    "Dortmund": "Dortmund",
+    "B Dortmund": "Dortmund",
+    "Borussia Dortmund": "Dortmund",
+    "Monchengladbach": "Gladbach",
+    "M'gladbach": "Gladbach",
+    "Mönchengladbach": "Gladbach",
+    "B Monchengladbach": "Gladbach",
+    "Borussia Monchengladbach": "Gladbach",
+    "Bremen": "Werder",
+    "Werder Bremen": "Werder",
+    "Cologne": "FC Köln",
+    "Köln": "FC Köln",
+    "FC Cologne": "FC Köln",
+    "Leipzig": "RB Leipzig",
+    "Mainz": "Mainz 05",
+}
+
+
+def _normalize_name(raw: str) -> str:
+    """Normalize a BetsAPI 'Team (Handle)' string using the alias map.
+
+    If the team portion matches a known alias, replaces it with the
+    canonical short name.  Handles and bare names pass through unchanged.
+
+    Examples:
+        'Leverkusen (Andrew)'  → 'Bayer 04 (Andrew)'
+        'Frankfurt (Kostolom89)' → 'Eintracht (Kostolom89)'
+        'Bayern (Sheva)'       → unchanged (already canonical)
+        'Andrew'               → unchanged (bare handle)
+    """
+    # Look for "Team (Handle)" format
+    paren = raw.rfind("(")
+    if paren <= 0:
+        return raw  # bare handle — nothing to normalize
+    team_part = raw[:paren].strip()
+    rest = raw[paren:]  # "(Handle)" including parens
+    canonical = _TEAM_ALIASES.get(team_part)
+    if canonical:
+        return f"{canonical} {rest}"
+    return raw
+
 
 class BetsAPIClient:
     """Async client for the BetsAPI REST API."""
@@ -91,6 +147,36 @@ class BetsAPIClient:
             raise RuntimeError(f"BetsAPI error: {error}")
 
         return data
+
+    # ── Single-event lookup ──────────────────────────────────────────
+
+    async def get_event_result(self, event_id: str) -> MatchResult | None:
+        """Fetch a single event's details and return a MatchResult if ended.
+
+        Uses BetsAPI's ``/v1/event/view`` endpoint to look up the event
+        directly by ID.  Returns None if the event is still in progress
+        or if the scores aren't available yet.
+        """
+        try:
+            data = await self._request_raw(
+                f"{_API_ROOT}/v1/event/view",
+                params={"event_id": event_id},
+            )
+        except Exception as e:
+            logger.debug("Event view failed for %s: %s", event_id, e)
+            return None
+
+        results = data.get("results", [])
+        if not results:
+            return None
+
+        ev = results[0] if isinstance(results, list) else results
+        # Only return a result if the event has ended (time_status 3 = ended)
+        if str(ev.get("time_status")) != "3":
+            return None
+
+        league_id = int(ev.get("league", {}).get("id", 0))
+        return self._parse_ended_match(ev, league_id)
 
     # ── Ended matches (for building history) ─────────────────────────
 
@@ -638,8 +724,8 @@ class BetsAPIClient:
         return MatchResult(
             match_id=str(event.get("id", "")),
             league_id=league_id,
-            home=home_info.get("name", "Unknown"),
-            away=away_info.get("name", "Unknown"),
+            home=_normalize_name(home_info.get("name", "Unknown")),
+            away=_normalize_name(away_info.get("name", "Unknown")),
             home_score=home_score,
             away_score=away_score,
             start_time=int(event.get("time", 0)),
@@ -654,8 +740,8 @@ class BetsAPIClient:
         return UpcomingMatch(
             match_id=str(event.get("id", "")),
             league_id=league_id,
-            home=home_info.get("name", "Unknown"),
-            away=away_info.get("name", "Unknown"),
+            home=_normalize_name(home_info.get("name", "Unknown")),
+            away=_normalize_name(away_info.get("name", "Unknown")),
             start_time=int(event.get("time", 0)),
         )
 
