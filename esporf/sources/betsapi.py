@@ -97,6 +97,11 @@ _LEAGUE_KEYWORDS: dict[int, str] = {
     37298: "gg",      # eSoccer GG League - 8 Mins Play (legacy)
 }
 
+# Keywords in BetsAPI league names that indicate archive / variant
+# tournaments we should never track.  These share a league_id with
+# the real tournament but produce phantom matches (always 0-0, voided).
+_LEAGUE_EXCLUSIONS: set[str] = {"archive", "special", "friendly"}
+
 
 class BetsAPIClient:
     """Async client for the BetsAPI REST API."""
@@ -260,6 +265,16 @@ class BetsAPIClient:
                     event.get("id"), name, required,
                 )
                 return False
+
+            # 3. Exclusion check — block archive / variant tournaments that
+            #    share a league_id with the real tournament.
+            for excl in _LEAGUE_EXCLUSIONS:
+                if excl in name:
+                    logger.debug(
+                        "Skipping event %s — league name '%s' contains exclusion '%s'",
+                        event.get("id"), name, excl,
+                    )
+                    return False
 
         return True
 
