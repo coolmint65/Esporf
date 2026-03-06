@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, CartesianGrid, ComposedChart, Area } from 'recharts'
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, CartesianGrid, AreaChart, Area, ReferenceLine } from 'recharts'
 import { api } from '../lib/api'
 import StatCard from '../components/StatCard'
 import Card from '../components/Card'
@@ -130,56 +130,76 @@ export default function Dashboard() {
           {chartData?.length > 0 ? (
             <div className="h-64">
               <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart data={chartData} margin={{ top: 8, right: 8, bottom: 0, left: -12 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#2e3245" />
-                  <XAxis
-                    dataKey="date"
-                    tick={{ fill: '#8b90a5', fontSize: 11 }}
-                    axisLine={false}
-                    tickLine={false}
-                    tickFormatter={(d) => {
-                      const [, m, day] = d.split('-')
-                      return `${parseInt(m)}/${parseInt(day)}`
-                    }}
-                  />
-                  <YAxis
-                    yAxisId="left"
-                    tick={{ fill: '#8b90a5', fontSize: 11 }}
-                    axisLine={false}
-                    tickLine={false}
-                    tickFormatter={(v) => `${v >= 0 ? '+' : ''}${v}u`}
-                  />
-                  <YAxis
-                    yAxisId="right"
-                    orientation="right"
-                    tick={{ fill: '#8b90a5', fontSize: 11 }}
-                    axisLine={false}
-                    tickLine={false}
-                    tickFormatter={(v) => `${v >= 0 ? '+' : ''}${v}u`}
-                  />
-                  <Tooltip
-                    contentStyle={{ background: '#1a1d27', border: '1px solid #2e3245', borderRadius: 8, fontSize: 13 }}
-                    itemStyle={{ color: '#e1e4ed' }}
-                    labelStyle={{ color: '#8b90a5' }}
-                    formatter={(v, name) => [
-                      `${v >= 0 ? '+' : ''}${v}u`,
-                      name === 'profit' ? 'Daily P&L' : 'Cumulative',
-                    ]}
-                  />
-                  <Bar yAxisId="left" dataKey="profit" radius={[4, 4, 0, 0]} maxBarSize={32}>
-                    {chartData.map((entry, i) => (
-                      <Cell key={i} fill={entry.profit >= 0 ? '#22c55e' : '#ef4444'} fillOpacity={0.8} />
-                    ))}
-                  </Bar>
-                  <Line
-                    yAxisId="right"
-                    type="monotone"
-                    dataKey="cumulative"
-                    stroke="#3b82f6"
-                    strokeWidth={2}
-                    dot={false}
-                  />
-                </ComposedChart>
+                {(() => {
+                  const vals = chartData.map((d) => d.cumulative)
+                  const max = Math.max(...vals, 0)
+                  const min = Math.min(...vals, 0)
+                  const range = max - min || 1
+                  const zeroOffset = max / range
+                  return (
+                    <AreaChart data={chartData} margin={{ top: 8, right: 8, bottom: 0, left: -12 }}>
+                      <defs>
+                        <linearGradient id="splitColor" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset={0} stopColor="#22c55e" stopOpacity={0.5} />
+                          <stop offset={zeroOffset} stopColor="#22c55e" stopOpacity={0.05} />
+                          <stop offset={zeroOffset} stopColor="#ef4444" stopOpacity={0.05} />
+                          <stop offset={1} stopColor="#ef4444" stopOpacity={0.5} />
+                        </linearGradient>
+                        <linearGradient id="splitStroke" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset={zeroOffset} stopColor="#22c55e" stopOpacity={1} />
+                          <stop offset={zeroOffset} stopColor="#ef4444" stopOpacity={1} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#2e3245" />
+                      <XAxis
+                        dataKey="date"
+                        tick={{ fill: '#8b90a5', fontSize: 11 }}
+                        axisLine={false}
+                        tickLine={false}
+                        tickFormatter={(d) => {
+                          const [, m, day] = d.split('-')
+                          return `${parseInt(m)}/${parseInt(day)}`
+                        }}
+                      />
+                      <YAxis
+                        tick={{ fill: '#8b90a5', fontSize: 11 }}
+                        axisLine={false}
+                        tickLine={false}
+                        tickFormatter={(v) => `${v >= 0 ? '+' : ''}${v}u`}
+                        domain={[min, max]}
+                      />
+                      <ReferenceLine y={0} stroke="#8b90a5" strokeDasharray="3 3" strokeOpacity={0.6} />
+                      <Tooltip
+                        contentStyle={{ background: '#1a1d27', border: '1px solid #2e3245', borderRadius: 8, fontSize: 13 }}
+                        itemStyle={{ color: '#e1e4ed' }}
+                        labelStyle={{ color: '#8b90a5' }}
+                        content={({ active, payload, label }) => {
+                          if (!active || !payload?.length) return null
+                          const entry = payload[0]?.payload
+                          if (!entry) return null
+                          return (
+                            <div style={{ background: '#1a1d27', border: '1px solid #2e3245', borderRadius: 8, padding: '8px 12px', fontSize: 13 }}>
+                              <div style={{ color: '#8b90a5', marginBottom: 4 }}>{label}</div>
+                              <div style={{ color: entry.profit >= 0 ? '#22c55e' : '#ef4444' }}>
+                                Daily P&L : {entry.profit >= 0 ? '+' : ''}{entry.profit}u
+                              </div>
+                              <div style={{ color: entry.cumulative >= 0 ? '#22c55e' : '#ef4444' }}>
+                                Cumulative : {entry.cumulative >= 0 ? '+' : ''}{entry.cumulative}u
+                              </div>
+                            </div>
+                          )
+                        }}
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="cumulative"
+                        stroke="url(#splitStroke)"
+                        strokeWidth={2}
+                        fill="url(#splitColor)"
+                      />
+                    </AreaChart>
+                  )
+                })()}
               </ResponsiveContainer>
             </div>
           ) : (

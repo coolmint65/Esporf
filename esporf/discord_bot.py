@@ -239,16 +239,7 @@ class EsporfDiscordBot(discord.Client):
         # only 10 s — if we clean up first, the gateway close may never
         # execute before Docker sends SIGKILL.
         await super().close()
-        await self.scanner.api.close()
-        await self.scanner.esb.close()
-        await self.scanner.ace.close()
-        await self.scanner.kambi.close()
-        await self.scanner.hudstats.close()
-        await self.scanner.bwin.close()
-        await self.scanner.fanduel.close()
-        await self.scanner.tc.close()
-        await self.scanner.forebet.close()
-        self.scanner.db.close()
+        await self.scanner.close()
 
 
 # ── Slash commands ────────────────────────────────────────────

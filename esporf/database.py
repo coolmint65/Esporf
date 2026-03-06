@@ -271,21 +271,18 @@ class MatchDatabase:
         """Insert multiple matches. Returns count of new matches added."""
         conn = self._get_conn()
         before = conn.total_changes
-        for match in matches:
-            try:
-                conn.execute(
-                    """INSERT OR IGNORE INTO matches
-                       (match_id, league_id, home, away, home_score, away_score,
-                        start_time, ht_home_score, ht_away_score)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        match.match_id, match.league_id, match.home, match.away,
-                        match.home_score, match.away_score, match.start_time,
-                        match.ht_home_score, match.ht_away_score,
-                    ),
-                )
-            except sqlite3.IntegrityError:
-                continue
+        conn.executemany(
+            """INSERT OR IGNORE INTO matches
+               (match_id, league_id, home, away, home_score, away_score,
+                start_time, ht_home_score, ht_away_score)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (m.match_id, m.league_id, m.home, m.away,
+                 m.home_score, m.away_score, m.start_time,
+                 m.ht_home_score, m.ht_away_score)
+                for m in matches
+            ],
+        )
         conn.commit()
         return conn.total_changes - before
 
@@ -311,78 +308,52 @@ class MatchDatabase:
         return (handle, f"%({handle})")
 
     def get_player_matches(
-        self, player: str, limit: int = 50, league_id: int | None = None
+        self, player: str, limit: int = 50, league_id: int | None = None,
+        *, side: str | None = None,
     ) -> list[MatchResult]:
-        """Get a player's most recent matches (home or away).
+        """Get a player's most recent matches.
 
         Matches by handle so 'Bayer 04 (Sheva)' finds matches where
         the same player used any team name.  Also handles bare handles
         (e.g. 'ALPHA') that may appear as 'Team (ALPHA)' in the DB.
+
+        Args:
+            side: None = both sides, "home" = home only, "away" = away only.
         """
         conn = self._get_conn()
         bare, paren = self._handle_patterns(player)
-        if league_id:
-            rows = conn.execute(
-                """SELECT * FROM matches
-                   WHERE (home LIKE ? OR home LIKE ?
-                       OR away LIKE ? OR away LIKE ?)
-                     AND league_id = ?
-                   ORDER BY start_time DESC LIMIT ?""",
-                (bare, paren, bare, paren, league_id, limit),
-            ).fetchall()
+
+        if side == "home":
+            where = "(home LIKE ? OR home LIKE ?)"
+            params: list = [bare, paren]
+        elif side == "away":
+            where = "(away LIKE ? OR away LIKE ?)"
+            params = [bare, paren]
         else:
-            rows = conn.execute(
-                """SELECT * FROM matches
-                   WHERE home LIKE ? OR home LIKE ?
-                      OR away LIKE ? OR away LIKE ?
-                   ORDER BY start_time DESC LIMIT ?""",
-                (bare, paren, bare, paren, limit),
-            ).fetchall()
+            where = "(home LIKE ? OR home LIKE ? OR away LIKE ? OR away LIKE ?)"
+            params = [bare, paren, bare, paren]
+
+        if league_id:
+            where += " AND league_id = ?"
+            params.append(league_id)
+
+        rows = conn.execute(
+            f"SELECT * FROM matches WHERE {where} ORDER BY start_time DESC LIMIT ?",
+            [*params, limit],
+        ).fetchall()
         return [self._row_to_match(r) for r in rows]
 
     def get_player_home_matches(
-        self, player: str, limit: int = 50, league_id: int | None = None
+        self, player: str, limit: int = 50, league_id: int | None = None,
     ) -> list[MatchResult]:
         """Get matches where the player was the home side."""
-        conn = self._get_conn()
-        bare, paren = self._handle_patterns(player)
-        if league_id:
-            rows = conn.execute(
-                """SELECT * FROM matches
-                   WHERE (home LIKE ? OR home LIKE ?) AND league_id = ?
-                   ORDER BY start_time DESC LIMIT ?""",
-                (bare, paren, league_id, limit),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """SELECT * FROM matches
-                   WHERE home LIKE ? OR home LIKE ?
-                   ORDER BY start_time DESC LIMIT ?""",
-                (bare, paren, limit),
-            ).fetchall()
-        return [self._row_to_match(r) for r in rows]
+        return self.get_player_matches(player, limit, league_id, side="home")
 
     def get_player_away_matches(
-        self, player: str, limit: int = 50, league_id: int | None = None
+        self, player: str, limit: int = 50, league_id: int | None = None,
     ) -> list[MatchResult]:
         """Get matches where the player was the away side."""
-        conn = self._get_conn()
-        bare, paren = self._handle_patterns(player)
-        if league_id:
-            rows = conn.execute(
-                """SELECT * FROM matches
-                   WHERE (away LIKE ? OR away LIKE ?) AND league_id = ?
-                   ORDER BY start_time DESC LIMIT ?""",
-                (bare, paren, league_id, limit),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """SELECT * FROM matches
-                   WHERE away LIKE ? OR away LIKE ?
-                   ORDER BY start_time DESC LIMIT ?""",
-                (bare, paren, limit),
-            ).fetchall()
-        return [self._row_to_match(r) for r in rows]
+        return self.get_player_matches(player, limit, league_id, side="away")
 
     def get_h2h_matches(
         self, player_a: str, player_b: str, limit: int = 50
@@ -861,56 +832,56 @@ class MatchDatabase:
         if now is None:
             now = int(time.time())
         conn = self._get_conn()
-        written = 0
+
+        ou_rows: list[tuple] = []
+        ml_rows: list[tuple] = []
+        sp_rows: list[tuple] = []
 
         for m in matches:
             odds = m.odds
             if odds is None or not odds.has_data:
                 continue
 
-            # O/U total lines
-            for ol in odds.total_lines:
-                conn.execute(
-                    """INSERT INTO odds_snapshots
-                       (match_id, league_id, home, away, start_time,
-                        line, over_odds, under_odds, source, captured_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (m.match_id, m.league_id, m.home, m.away,
-                     m.start_time, ol.line, ol.over_odds, ol.under_odds,
-                     ol.source, now),
-                )
-                written += 1
+            base = (m.match_id, m.league_id, m.home, m.away, m.start_time)
 
-            # Moneyline
+            for ol in odds.total_lines:
+                ou_rows.append((*base, ol.line, ol.over_odds, ol.under_odds, ol.source, now))
+
             if odds.moneyline:
                 ml = odds.moneyline
-                conn.execute(
-                    """INSERT INTO odds_snapshots
-                       (match_id, league_id, home, away, start_time,
-                        home_ml, draw_ml, away_ml, source, captured_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (m.match_id, m.league_id, m.home, m.away,
-                     m.start_time, ml.home_odds, ml.draw_odds,
-                     ml.away_odds, ml.source, now),
-                )
-                written += 1
+                ml_rows.append((*base, ml.home_odds, ml.draw_odds, ml.away_odds, ml.source, now))
 
-            # Spreads
             for sl in odds.spreads:
-                conn.execute(
-                    """INSERT INTO odds_snapshots
-                       (match_id, league_id, home, away, start_time,
-                        spread, spread_home_odds, spread_away_odds,
-                        source, captured_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (m.match_id, m.league_id, m.home, m.away,
-                     m.start_time, sl.handicap, sl.home_odds,
-                     sl.away_odds, sl.source, now),
-                )
-                written += 1
+                sp_rows.append((*base, sl.handicap, sl.home_odds, sl.away_odds, sl.source, now))
+
+        if ou_rows:
+            conn.executemany(
+                """INSERT INTO odds_snapshots
+                   (match_id, league_id, home, away, start_time,
+                    line, over_odds, under_odds, source, captured_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ou_rows,
+            )
+        if ml_rows:
+            conn.executemany(
+                """INSERT INTO odds_snapshots
+                   (match_id, league_id, home, away, start_time,
+                    home_ml, draw_ml, away_ml, source, captured_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ml_rows,
+            )
+        if sp_rows:
+            conn.executemany(
+                """INSERT INTO odds_snapshots
+                   (match_id, league_id, home, away, start_time,
+                    spread, spread_home_odds, spread_away_odds,
+                    source, captured_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                sp_rows,
+            )
 
         conn.commit()
-        return written
+        return len(ou_rows) + len(ml_rows) + len(sp_rows)
 
     def get_odds_history(
         self, match_id: str, line: float | None = None,

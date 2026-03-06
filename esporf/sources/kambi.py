@@ -30,7 +30,7 @@ from datetime import datetime
 
 import httpx
 
-from esporf.models import MatchOdds, MoneylineOdds, OddsLine, SpreadLine, UpcomingMatch, extract_handle
+from esporf.models import MatchOdds, MoneylineOdds, OddsLine, SpreadLine, UpcomingMatch, extract_handle, match_by_handles
 
 logger = logging.getLogger(__name__)
 
@@ -408,30 +408,8 @@ def _find_matching_event(
     match: UpcomingMatch,
     kambi_events: list[_KambiEvent],
 ) -> _KambiEvent | None:
-    """Find the Kambi event that corresponds to our UpcomingMatch.
-
-    Kambi uses the same "Team (Handle)" naming format as BetsAPI, so
-    we match on player handles (case-insensitive) and start time within
-    a tolerance window.
-    """
-    our_home = extract_handle(match.home).lower()
-    our_away = extract_handle(match.away).lower()
-    our_pair = frozenset([our_home, our_away])
-
-    best: _KambiEvent | None = None
-    best_delta = _TIME_TOLERANCE + 1
-
-    for event in kambi_events:
-        kambi_home = extract_handle(event.home).lower()
-        kambi_away = extract_handle(event.away).lower()
-        kambi_pair = frozenset([kambi_home, kambi_away])
-
-        if our_pair != kambi_pair:
-            continue
-
-        delta = abs(event.start_time - match.start_time)
-        if delta <= _TIME_TOLERANCE and delta < best_delta:
-            best = event
-            best_delta = delta
-
-    return best
+    """Find the Kambi event that corresponds to our UpcomingMatch."""
+    return match_by_handles(
+        match.home, match.away, match.start_time,
+        kambi_events, time_tolerance=_TIME_TOLERANCE,
+    )

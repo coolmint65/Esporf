@@ -37,8 +37,8 @@ from esporf.models import (
     UpcomingMatch,
     extract_handle,
     extract_team,
-    _parse_line,
-    _parse_spread,
+    parse_line,
+    parse_spread,
 )
 from esporf.sources.aceodds import AceOddsClient
 from esporf.sources.betsapi import BetsAPIClient
@@ -93,7 +93,18 @@ class EsporfBot:
         self._scan_count = 0
         self._alerted_keys: set[str] = set()
         self._prev_hudstats_live: dict[str, LiveScore] = {}
+        # All async HTTP clients — used by close() for clean shutdown
+        self._http_clients = [
+            self.api, self.esb, self.ace, self.kambi,
+            self.hudstats, self.bwin, self.fanduel, self.tc, self.forebet,
+        ]
         self._load_alerted_keys()
+
+    async def close(self) -> None:
+        """Shut down all HTTP clients and the database connection."""
+        for client in self._http_clients:
+            await client.close()
+        self.db.close()
 
     # ── Name enrichment ──────────────────────────────────────────
 
@@ -213,7 +224,7 @@ class EsporfBot:
         # Different odds sources can merge lines from different books, leading
         # to phantom picks like "Over 2.5" when the primary book starts at 5.5.
         odds = report.match.odds
-        parsed = _parse_line(pick.market)
+        parsed = parse_line(pick.market)
         if parsed and odds and odds.has_data:
             direction, line = parsed
             if not odds.get_line(line):
@@ -450,8 +461,8 @@ class EsporfBot:
         market = pick.market
         total_goals = result.total_goals
 
-        parsed_line = _parse_line(market)
-        parsed_spread = _parse_spread(market)
+        parsed_line = parse_line(market)
+        parsed_spread = parse_spread(market)
 
         won = False
 
@@ -658,6 +669,12 @@ class EsporfBot:
         # or bwin (which has dedicated Volta competitions) also list.
         volta_confirmed: set[str] = set()
 
+        # Track matches confirmed as GG League by a dedicated source
+        # (HUDstats or Kambi).  BetsAPI lumps archive / variant tournaments
+        # under the same league_id 42648, producing phantom picks that
+        # always void.  Same enforcement pattern as Volta below.
+        gg_confirmed: set[str] = set()
+
         try:
             ace_matches = await self.ace.get_volta_schedule()
             for m in ace_matches:
@@ -701,6 +718,7 @@ class EsporfBot:
             hudstats_matches = await self.hudstats.get_schedule()
             for m in hudstats_matches:
                 key = _match_key(m)
+                gg_confirmed.add(key)
                 if key not in seen_keys:
                     seen_keys.add(key)
                     key_to_idx[key] = len(all_upcoming)
@@ -744,6 +762,8 @@ class EsporfBot:
             for m in kambi_matches:
                 key = _match_key(m)
                 kambi_league_ids.add(m.league_id)
+                if m.league_id == 42648:
+                    gg_confirmed.add(key)
                 if key not in seen_keys:
                     seen_keys.add(key)
                     key_to_idx[key] = len(all_upcoming)
@@ -858,6 +878,24 @@ class EsporfBot:
             if dropped:
                 logger.info(
                     "Volta filter: dropped %d match(es) not confirmed by ESB/AceOdds",
+                    dropped,
+                )
+
+        # Strict GG League enforcement: BetsAPI lumps archive / variant
+        # tournaments under the same league_id 42648 as real GG League.
+        # These phantom matches produce picks that never resolve (0-0, voided).
+        # Only keep GG League matches confirmed by HUDstats or Kambi.
+        gg_lid = 42648
+        if gg_confirmed:
+            before = len(all_upcoming)
+            all_upcoming = [
+                m for m in all_upcoming
+                if m.league_id != gg_lid or _match_key(m) in gg_confirmed
+            ]
+            dropped = before - len(all_upcoming)
+            if dropped:
+                logger.info(
+                    "GG League filter: dropped %d match(es) not confirmed by HUDstats/Kambi",
                     dropped,
                 )
 

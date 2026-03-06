@@ -30,6 +30,7 @@ from esporf.models import (
     SpreadLine,
     UpcomingMatch,
     extract_handle,
+    match_by_handles,
 )
 
 logger = logging.getLogger(__name__)
@@ -396,28 +397,8 @@ def _find_matching_event(
     match: UpcomingMatch,
     fd_events: list[_FanDuelEvent],
 ) -> _FanDuelEvent | None:
-    """Find the FanDuel event that corresponds to our UpcomingMatch.
-
-    Matches by player handles (case-insensitive) and start time.
-    """
-    our_home = extract_handle(match.home).lower()
-    our_away = extract_handle(match.away).lower()
-    our_pair = frozenset([our_home, our_away])
-
-    best: _FanDuelEvent | None = None
-    best_delta = _TIME_TOLERANCE + 1
-
-    for event in fd_events:
-        fd_home = extract_handle(event.home).lower()
-        fd_away = extract_handle(event.away).lower()
-        fd_pair = frozenset([fd_home, fd_away])
-
-        if our_pair != fd_pair:
-            continue
-
-        delta = abs(event.start_time - match.start_time)
-        if delta <= _TIME_TOLERANCE and delta < best_delta:
-            best = event
-            best_delta = delta
-
-    return best
+    """Find the FanDuel event that corresponds to our UpcomingMatch."""
+    return match_by_handles(
+        match.home, match.away, match.start_time,
+        fd_events, time_tolerance=_TIME_TOLERANCE,
+    )

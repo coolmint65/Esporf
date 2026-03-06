@@ -47,6 +47,40 @@ def extract_team(name: str) -> str | None:
     return None
 
 
+def match_by_handles(
+    home: str,
+    away: str,
+    start_time: int,
+    candidates: list,
+    *,
+    time_tolerance: int = 600,
+    home_attr: str = "home",
+    away_attr: str = "away",
+    time_attr: str = "start_time",
+):
+    """Find the candidate whose player handles match home/away within a time window.
+
+    Generic helper used by kambi, bwin, and fanduel to pair their events
+    with our UpcomingMatch objects.  Returns the best matching candidate
+    or None.
+    """
+    our_pair = frozenset([extract_handle(home).lower(), extract_handle(away).lower()])
+    best = None
+    best_delta = time_tolerance + 1
+
+    for c in candidates:
+        c_home = extract_handle(getattr(c, home_attr)).lower()
+        c_away = extract_handle(getattr(c, away_attr)).lower()
+        if frozenset([c_home, c_away]) != our_pair:
+            continue
+        delta = abs(getattr(c, time_attr) - start_time)
+        if delta <= time_tolerance and delta < best_delta:
+            best = c
+            best_delta = delta
+
+    return best
+
+
 def _same_player(a: str, b: str) -> bool:
     """Check if two player strings refer to the same player by handle."""
     return extract_handle(a) == extract_handle(b)
@@ -607,7 +641,7 @@ class BetPick:
                 return self.spread_line.home_odds
             return self.spread_line.away_odds
         if self.odds_line:
-            parsed = _parse_line(self.market)
+            parsed = parse_line(self.market)
             if not parsed:
                 return None
             direction = parsed[0]
@@ -626,7 +660,7 @@ class BetPick:
                 return self.spread_line.home_american
             return self.spread_line.away_american
         if self.odds_line:
-            parsed = _parse_line(self.market)
+            parsed = parse_line(self.market)
             if not parsed:
                 return None
             direction = parsed[0]
@@ -785,8 +819,8 @@ class MatchupReport:
         best_spread_side: str | None = None
 
         for market, trends in market_groups.items():
-            parsed = _parse_line(market)
-            parsed_spread = _parse_spread(market)
+            parsed = parse_line(market)
+            parsed_spread = parse_spread(market)
             agreement = len(trends)
             # Count only real trends (sample_size >= 5) toward agreement;
             # synthetic signals like Forebet (sample_size=1) can boost
@@ -950,7 +984,7 @@ class MatchupReport:
         # Build reason with actual odds
         odds_str = ""
         if best_odds_line:
-            parsed = _parse_line(best_market)
+            parsed = parse_line(best_market)
             if parsed:
                 direction = parsed[0]
                 if direction.lower() == "over":
@@ -1021,7 +1055,7 @@ _LINE_RE = re.compile(r"(Over|Under)\s+(\d+(?:\.\d+)?)\s+Goals$", re.IGNORECASE)
 _SPREAD_RE = re.compile(r"(.+?)\s+([+-]\d+(?:\.\d+)?)$")
 
 
-def _parse_line(market: str) -> tuple[str, float] | None:
+def parse_line(market: str) -> tuple[str, float] | None:
     """Extract direction and line value from a market name.
 
     Returns e.g. ("Under", 4.5) or None for non-line markets.
@@ -1032,7 +1066,7 @@ def _parse_line(market: str) -> tuple[str, float] | None:
     return m.group(1), float(m.group(2))
 
 
-def _parse_spread(market: str) -> tuple[str, float] | None:
+def parse_spread(market: str) -> tuple[str, float] | None:
     """Extract player name and handicap from a spread market.
 
     Returns e.g. ("PlayerName", -0.5) or None for non-spread markets.

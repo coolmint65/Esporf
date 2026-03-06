@@ -87,6 +87,22 @@ def _normalize_name(raw: str) -> str:
     return raw
 
 
+# League ID → required keyword in the BetsAPI league name.
+# Used to catch misclassified events across neighbouring leagues.
+_LEAGUE_KEYWORDS: dict[int, str] = {
+    38439: "volta",   # eSoccer Battle - Volta - 6 Mins Play
+    42648: "battle",  # Esoccer Battle 8min (2025 season)
+    42649: "gt",      # GT Leagues 12min (2025 season)
+    23114: "gt",      # eSoccer GT Leagues - 12 Mins Play (legacy)
+    37298: "gg",      # eSoccer GG League - 8 Mins Play (legacy)
+}
+
+# Keywords in BetsAPI league names that indicate archive / variant
+# tournaments we should never track.  These share a league_id with
+# the real tournament but produce phantom matches (always 0-0, voided).
+_LEAGUE_EXCLUSIONS: set[str] = {"archive", "special", "friendly"}
+
+
 class BetsAPIClient:
     """Async client for the BetsAPI REST API."""
 
@@ -242,20 +258,23 @@ class BetsAPIClient:
         #    numeric ID matches but the name reveals the real league.
         name = str(event_league.get("name", "")).lower()
         if name:
-            _REQUIRED_KEYWORDS: dict[int, str] = {
-                38439: "volta",   # eSoccer Battle - Volta - 6 Mins Play
-                42648: "battle",  # Esoccer Battle 8min (2025 season)
-                42649: "gt",      # GT Leagues 12min (2025 season)
-                23114: "gt",      # eSoccer GT Leagues - 12 Mins Play (legacy)
-                37298: "gg",      # eSoccer GG League - 8 Mins Play (legacy)
-            }
-            required = _REQUIRED_KEYWORDS.get(league_id)
+            required = _LEAGUE_KEYWORDS.get(league_id)
             if required and required not in name:
                 logger.debug(
                     "Skipping event %s — league name '%s' missing keyword '%s'",
                     event.get("id"), name, required,
                 )
                 return False
+
+            # 3. Exclusion check — block archive / variant tournaments that
+            #    share a league_id with the real tournament.
+            for excl in _LEAGUE_EXCLUSIONS:
+                if excl in name:
+                    logger.debug(
+                        "Skipping event %s — league name '%s' contains exclusion '%s'",
+                        event.get("id"), name, excl,
+                    )
+                    return False
 
         return True
 
