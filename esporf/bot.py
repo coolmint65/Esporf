@@ -1262,10 +1262,31 @@ class EsporfBot:
         ]
         if new_reports:
             new_reports.sort(key=lambda r: r.match.start_time)
+            # Per-cycle player cap: max 1 pick per player handle per scan.
+            # Prevents stacking 3-4 bets on the same player in one cycle
+            # before the feedback engine has a chance to penalize losses.
+            cycle_player_picks: dict[str, int] = {}
+            _MAX_PICKS_PER_PLAYER = 1
             for r in new_reports:
+                home_h = extract_handle(r.match.home).lower()
+                away_h = extract_handle(r.match.away).lower()
+                home_count = cycle_player_picks.get(home_h, 0)
+                away_count = cycle_player_picks.get(away_h, 0)
+                if (home_count >= _MAX_PICKS_PER_PLAYER
+                        or away_count >= _MAX_PICKS_PER_PLAYER):
+                    logger.info(
+                        "Skipped pick — player cap reached: %s vs %s "
+                        "(%s=%d, %s=%d)",
+                        home_h, away_h,
+                        home_h, home_count, away_h, away_count,
+                    )
+                    continue
                 self._alerted_keys.add(_match_key(r.match))
-                self.record_pick(r)
-            alerted_count = len(new_reports)
+                recorded = self.record_pick(r)
+                if recorded:
+                    cycle_player_picks[home_h] = home_count + 1
+                    cycle_player_picks[away_h] = away_count + 1
+                    alerted_count += 1
 
         # Log scan metadata
         self.db.log_scan(
