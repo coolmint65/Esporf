@@ -276,6 +276,26 @@ class BetsAPIClient:
                     )
                     return False
 
+        # 4. Handle-case check for GG League: real GG League players always
+        #    use ALL-CAPS handles (EXECUTIONER, GLORY, etc.).  Variant /
+        #    archive tournaments sharing league_id 42648 use mixed-case
+        #    (dm1trena, DaVa).  These never resolve and always void.
+        if league_id == 42648:
+            home_info = event.get("home", {})
+            away_info = event.get("away", {})
+            home_name = home_info.get("name", "") if isinstance(home_info, dict) else ""
+            away_name = away_info.get("name", "") if isinstance(away_info, dict) else ""
+            if home_name and away_name:
+                from esporf.models import extract_handle
+                h_handle = extract_handle(home_name)
+                a_handle = extract_handle(away_name)
+                if h_handle != h_handle.upper() or a_handle != a_handle.upper():
+                    logger.debug(
+                        "Skipping GG League event %s — non-CAPS handles: %s vs %s",
+                        event.get("id"), h_handle, a_handle,
+                    )
+                    return False
+
         return True
 
     # ── Upcoming matches ─────────────────────────────────────────────

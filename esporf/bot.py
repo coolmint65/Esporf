@@ -72,6 +72,21 @@ def _match_key(m: UpcomingMatch) -> str:
     return f"{pair[0]}_{pair[1]}_{rounded_time}"
 
 
+def _is_real_gg_match(m: UpcomingMatch) -> bool:
+    """Check if a GG League match has real GG League player handles.
+
+    Real GG League (H2H Global Gaming League) players always use ALL-CAPS
+    handles: EXECUTIONER, GLORY, CATALYST, JAEGER, DANTE, etc.
+
+    BetsAPI lumps variant/archive tournaments under the same league_id
+    (42648), but those use mixed-case handles: dm1trena, DaVa, sane4ek8.
+    These matches never resolve and always void with 0-0.
+    """
+    home_handle = extract_handle(m.home)
+    away_handle = extract_handle(m.away)
+    return home_handle == home_handle.upper() and away_handle == away_handle.upper()
+
+
 class EsporfBot:
     """The main bot that collects data, finds trends, and sends alerts."""
 
@@ -794,7 +809,7 @@ class EsporfBot:
                         all_upcoming.append(m)
                     elif key in key_to_idx:
                         existing = all_upcoming[key_to_idx[key]]
-                        if existing.match_id.startswith(("esb_", "ace_", "hudstats_")):
+                        if existing.match_id.startswith(("esb_", "ace_", "hudstats_", "kambi_")):
                             existing.match_id = m.match_id
                             logger.debug(
                                 "Cross-referenced %s vs %s with BetsAPI ID %s",
@@ -898,6 +913,25 @@ class EsporfBot:
                     "GG League filter: dropped %d match(es) not confirmed by HUDstats/Kambi",
                     dropped,
                 )
+
+        # Handle-case filter: real GG League players use ALL-CAPS handles
+        # (EXECUTIONER, GLORY, CATALYST, JAEGER, etc.).  BetsAPI's variant /
+        # archive tournaments share the same league_id but use mixed-case
+        # handles (dm1trena, DaVa, sane4ek8).  These matches never resolve
+        # properly and always void.  Drop any GG League match where either
+        # handle is not ALL-CAPS.
+        before = len(all_upcoming)
+        all_upcoming = [
+            m for m in all_upcoming
+            if m.league_id != gg_lid or _is_real_gg_match(m)
+        ]
+        dropped_case = before - len(all_upcoming)
+        if dropped_case:
+            logger.info(
+                "GG League handle filter: dropped %d match(es) with non-CAPS "
+                "handles (variant/archive tournament)",
+                dropped_case,
+            )
 
         # Enrich bare-handle names with team names from DB history.
         # When AceOdds/ESportsBattle fail, BetsAPI matches only have handles
