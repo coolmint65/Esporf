@@ -713,6 +713,10 @@ class BetPick:
         Beyond the composite confidence score, 2u and 3u plays must also
         pass hard gates on edge, trend agreement, and hit rate.  This
         prevents a single strong signal from inflating unit size.
+
+        Thresholds are intentionally tight: a losing 2u bet costs twice
+        as much as a losing 1u, so the bar must be proportionally higher.
+        Most plays should be 1u; 2u should be rare and 3u near-impossible.
         """
         c = self.confidence
         n_trends = len(self.supporting_trends)
@@ -723,12 +727,12 @@ class BetPick:
         )
         edge = self.edge or 0.0
 
-        # 3u — the ultimate hammer: everything must line up
-        if c >= 0.93 and edge >= 0.15 and n_trends >= 4 and avg_rate >= 0.80:
+        # 3u — the ultimate hammer: everything must line up perfectly
+        if c >= 0.96 and edge >= 0.20 and n_trends >= 5 and avg_rate >= 0.85:
             return 3.0
 
-        # 2u — strong conviction: high score AND solid underlying data
-        if c >= 0.85 and edge >= 0.12 and n_trends >= 3 and avg_rate >= 0.78:
+        # 2u — strong conviction: very high score AND solid underlying data
+        if c >= 0.90 and edge >= 0.15 and n_trends >= 4 and avg_rate >= 0.82:
             return 2.0
 
         # Everything else is 1u — still a recommended play, just standard size
