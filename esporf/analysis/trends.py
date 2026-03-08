@@ -15,7 +15,9 @@ External data sources (when available):
 from __future__ import annotations
 
 import logging
+import math
 
+from esporf.analysis.context import ContextAnalyzer
 from esporf.config import settings
 from esporf.database import MatchDatabase
 from esporf.models import (
@@ -33,6 +35,41 @@ from esporf.sources.totalcorner import LeagueStats
 logger = logging.getLogger(__name__)
 
 
+# ── Recency weighting ──────────────────────────────────────────────
+# Exponential decay half-life: the weight of a match halves every
+# HALF_LIFE matches back in time. Match 0 (most recent) = weight 1.0,
+# match HALF_LIFE = 0.5, match 2*HALF_LIFE = 0.25, etc.
+_RECENCY_HALF_LIFE = 8  # matches
+
+
+def _recency_weight(index: int) -> float:
+    """Exponential decay weight for match at position *index* (0 = most recent)."""
+    return math.pow(0.5, index / _RECENCY_HALF_LIFE)
+
+
+def _weighted_hit_rate(
+    matches: list[MatchResult],
+    predicate,
+) -> tuple[float, float]:
+    """Compute recency-weighted hit rate for a list of matches.
+
+    Args:
+        matches: Ordered newest-first.
+        predicate: Callable(match) → bool, True if the trend "hits".
+
+    Returns:
+        (weighted_hits, total_weight) — caller divides to get rate.
+    """
+    total_w = 0.0
+    hit_w = 0.0
+    for i, m in enumerate(matches):
+        w = _recency_weight(i)
+        total_w += w
+        if predicate(m):
+            hit_w += w
+    return hit_w, total_w
+
+
 class TrendAnalyzer:
     """Analyzes match history to find qualifying trends for a matchup."""
 
@@ -42,6 +79,7 @@ class TrendAnalyzer:
         self.min_sample = settings.min_sample_size
         self.last_n = settings.last_n_matches
         self.goal_lines = settings.goal_line_values
+        self.context_analyzer = ContextAnalyzer(db)
 
     def effective_min_rate(self, sample_size: int) -> float:
         """Dynamic hit-rate threshold that scales with sample size.
@@ -132,6 +170,11 @@ class TrendAnalyzer:
             match.home, match.away, match.league_id, tc_stats=tc_stats
         )
 
+        # Compute contextual modifiers (time-of-day, fatigue, streaks, variance)
+        match_context = self.context_analyzer.analyze(
+            match.home, match.away, match.start_time, match.league_id,
+        )
+
         # Determine which goal lines to analyze
         if match.league_id in NO_TOTALS_LEAGUES:
             # GT Leagues — sportsbooks don't offer O/U goals, moneyline only
@@ -189,6 +232,7 @@ class TrendAnalyzer:
         return MatchupReport(
             match=match, trends=trends, avg_goals=avg_goals,
             form_modifier=combined_modifier,
+            match_context=match_context,
         )
 
     # ── Head-to-Head Trends ──────────────────────────────────────────
@@ -209,53 +253,76 @@ class TrendAnalyzer:
         recent_scores = [m.score_str() for m in matches[:5]]
         lines = goal_lines if goal_lines is not None else self.goal_lines
 
-        # Total goals over/under
+        # Total goals over/under (recency-weighted)
         for line in lines:
             hits = sum(1 for m in matches if m.total_goals > line)
+            hit_w, total_w = _weighted_hit_rate(
+                matches, lambda m, _l=line: m.total_goals > _l,
+            )
+            w_rate = hit_w / total_w if total_w > 0 else 0.0
             trends.append(self._make_trend(
                 category=f"Over {line} Goals",
                 hits=hits, total=len(matches),
                 trend_type="h2h", player_a=player_a, player_b=player_b,
                 league_id=league_id, recent=recent_scores,
                 desc_template=f"{player_a} vs {player_b} — Over {line} total goals",
+                weighted_rate=w_rate,
             ))
 
             under_hits = sum(1 for m in matches if m.total_goals < line)
+            hit_w, total_w = _weighted_hit_rate(
+                matches, lambda m, _l=line: m.total_goals < _l,
+            )
+            w_rate = hit_w / total_w if total_w > 0 else 0.0
             trends.append(self._make_trend(
                 category=f"Under {line} Goals",
                 hits=under_hits, total=len(matches),
                 trend_type="h2h", player_a=player_a, player_b=player_b,
                 league_id=league_id, recent=recent_scores,
                 desc_template=f"{player_a} vs {player_b} — Under {line} total goals",
+                weighted_rate=w_rate,
             ))
 
-        # H2H win rate for player A
+        # H2H win rate for player A (recency-weighted)
         a_wins = sum(1 for m in matches if m.won_by(player_a))
+        hit_w, total_w = _weighted_hit_rate(
+            matches, lambda m, _p=player_a: m.won_by(_p),
+        )
+        w_rate_a = hit_w / total_w if total_w > 0 else 0.0
         trends.append(self._make_trend(
             category=f"{player_a} Win",
             hits=a_wins, total=len(matches),
             trend_type="h2h", player_a=player_a, player_b=player_b,
             league_id=league_id, recent=recent_scores,
             desc_template=f"{player_a} wins vs {player_b}",
+            weighted_rate=w_rate_a,
         ))
 
         b_wins = sum(1 for m in matches if m.won_by(player_b))
+        hit_w, total_w = _weighted_hit_rate(
+            matches, lambda m, _p=player_b: m.won_by(_p),
+        )
+        w_rate_b = hit_w / total_w if total_w > 0 else 0.0
         trends.append(self._make_trend(
             category=f"{player_b} Win",
             hits=b_wins, total=len(matches),
             trend_type="h2h", player_a=player_b, player_b=player_a,
             league_id=league_id, recent=recent_scores,
             desc_template=f"{player_b} wins vs {player_a}",
+            weighted_rate=w_rate_b,
         ))
 
-        # Draw rate in H2H
+        # Draw rate in H2H (recency-weighted)
         draws = sum(1 for m in matches if m.is_draw)
+        hit_w, total_w = _weighted_hit_rate(matches, lambda m: m.is_draw)
+        w_rate_d = hit_w / total_w if total_w > 0 else 0.0
         trends.append(self._make_trend(
             category="Draw",
             hits=draws, total=len(matches),
             trend_type="h2h", player_a=player_a, player_b=player_b,
             league_id=league_id, recent=recent_scores,
             desc_template=f"{player_a} vs {player_b} — Draw",
+            weighted_rate=w_rate_d,
         ))
 
         return [t for t in trends if t is not None]
@@ -307,34 +374,49 @@ class TrendAnalyzer:
         suffix = ctx.get(trend_type.replace("player_", ""), "")
         lines = goal_lines if goal_lines is not None else self.goal_lines
 
-        # Total goals over/under
+        # Total goals over/under (recency-weighted)
         for line in lines:
             hits = sum(1 for m in matches if m.total_goals > line)
+            hit_w, total_w = _weighted_hit_rate(
+                matches, lambda m, _l=line: m.total_goals > _l,
+            )
+            w_rate = hit_w / total_w if total_w > 0 else 0.0
             trends.append(self._make_trend(
                 category=f"Over {line} Goals",
                 hits=hits, total=len(matches),
                 trend_type=trend_type, player_a=player,
                 league_id=league_id, recent=recent,
                 desc_template=f"{player} {suffix} — Over {line} total goals",
+                weighted_rate=w_rate,
             ))
 
             under_hits = sum(1 for m in matches if m.total_goals < line)
+            hit_w, total_w = _weighted_hit_rate(
+                matches, lambda m, _l=line: m.total_goals < _l,
+            )
+            w_rate = hit_w / total_w if total_w > 0 else 0.0
             trends.append(self._make_trend(
                 category=f"Under {line} Goals",
                 hits=under_hits, total=len(matches),
                 trend_type=trend_type, player_a=player,
                 league_id=league_id, recent=recent,
                 desc_template=f"{player} {suffix} — Under {line} total goals",
+                weighted_rate=w_rate,
             ))
 
-        # Win rate
+        # Win rate (recency-weighted)
         wins = sum(1 for m in matches if m.won_by(player))
+        hit_w, total_w = _weighted_hit_rate(
+            matches, lambda m, _p=player: m.won_by(_p),
+        )
+        w_rate = hit_w / total_w if total_w > 0 else 0.0
         trends.append(self._make_trend(
             category=f"{player} Win",
             hits=wins, total=len(matches),
             trend_type=trend_type, player_a=player,
             league_id=league_id, recent=recent,
             desc_template=f"{player} {suffix} — Wins",
+            weighted_rate=w_rate,
         ))
 
         return [t for t in trends if t is not None]
@@ -643,12 +725,19 @@ class TrendAnalyzer:
         recent: list[str],
         desc_template: str,
         player_b: str | None = None,
+        weighted_rate: float | None = None,
     ) -> Trend | None:
-        """Create a Trend only if it meets the dynamic hit rate threshold."""
+        """Create a Trend only if it meets the dynamic hit rate threshold.
+
+        When weighted_rate is provided (recency-weighted), use it for the
+        hit_rate field instead of the flat hits/total ratio. This gives
+        more weight to recent matches in the scoring pipeline.
+        """
         if total < self.min_sample:
             return None
 
-        hit_rate = hits / total
+        flat_rate = hits / total
+        hit_rate = weighted_rate if weighted_rate is not None else flat_rate
         if hit_rate < self.effective_min_rate(total):
             return None
 

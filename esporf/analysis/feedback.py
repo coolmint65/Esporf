@@ -28,8 +28,10 @@ from esporf.models import extract_handle
 
 logger = logging.getLogger(__name__)
 
-# Minimum resolved picks in a dimension before we apply adjustments
-MIN_PICKS_FOR_ADJUSTMENT = 5
+# Minimum resolved picks in a dimension before we apply adjustments.
+# Low threshold (3) so the engine reacts fast to losing streaks —
+# waiting for 5 losses means you're already down 5+ units.
+MIN_PICKS_FOR_ADJUSTMENT = 3
 
 # Rolling window: only consider picks from the last N days
 FEEDBACK_WINDOW_DAYS = 14
@@ -173,8 +175,10 @@ class FeedbackAnalyzer:
         if key in self._cache:
             combined *= self._cache[key].penalty
 
-        # Clamp to reasonable range — never fully kill or over-boost a pick
-        return max(0.40, min(1.20, combined))
+        # Clamp to reasonable range.  Floor at 0.25 so stacking penalties
+        # across multiple losing dimensions can effectively kill a pick
+        # (confidence drops below the minimum threshold in best_bet).
+        return max(0.25, min(1.20, combined))
 
     @property
     def adjustments(self) -> dict[str, FeedbackAdjustment]:
@@ -300,18 +304,21 @@ class FeedbackAnalyzer:
 def _compute_penalty(win_rate: float, sample_size: int, profit: float) -> float:
     """Compute a penalty/bonus multiplier from win rate and sample size.
 
-    The penalty curve:
+    The penalty curve — neutral zone starts at 52% (breakeven for -110
+    juice), not 45%.  Anything below breakeven is losing money and
+    should be penalized:
+
     - win_rate >= 60% and profitable → bonus up to 1.15
-    - win_rate 45-60% → neutral zone (1.0)
-    - win_rate 35-45% → mild penalty (0.85-0.95)
-    - win_rate 25-35% → moderate penalty (0.70-0.85)
-    - win_rate < 25% → heavy penalty (0.55-0.70)
+    - win_rate 52-60% → neutral zone (1.0)
+    - win_rate 40-52% → mild penalty (0.80-0.95)
+    - win_rate 30-40% → moderate penalty (0.65-0.80)
+    - win_rate < 30% → heavy penalty (0.45-0.65)
 
     Larger samples make the penalty more aggressive (higher confidence
-    in the signal). Small samples (5-8 picks) are dampened toward 1.0.
+    in the signal). Small samples (3-5 picks) are dampened toward 1.0.
     """
     # Confidence factor: larger samples get stronger adjustments
-    # 5 picks → 0.5 strength, 10 → 0.75, 20+ → 1.0
+    # 3 picks → 0.5 strength, 8 → 0.75, 18+ → 1.0
     confidence = min(1.0, (sample_size - MIN_PICKS_FOR_ADJUSTMENT) / 15 + 0.5)
 
     if win_rate >= 0.60 and profit > 0:
@@ -319,22 +326,22 @@ def _compute_penalty(win_rate: float, sample_size: int, profit: float) -> float:
         raw_bonus = 1.0 + (win_rate - 0.55) * 0.30
         return 1.0 + (min(raw_bonus, 1.15) - 1.0) * confidence
 
-    if win_rate >= 0.45:
-        # Neutral zone — no adjustment
+    if win_rate >= 0.52:
+        # Neutral zone — at or above breakeven for standard juice
         return 1.0
 
-    if win_rate >= 0.35:
-        # Mild penalty
-        raw = 0.85 + (win_rate - 0.35) * 1.0  # 0.85 at 35%, 0.95 at 45%
+    if win_rate >= 0.40:
+        # Mild penalty — below breakeven but not terrible
+        raw = 0.80 + (win_rate - 0.40) * 1.25  # 0.80 at 40%, 0.95 at 52%
         return 1.0 - (1.0 - raw) * confidence
 
-    if win_rate >= 0.25:
-        # Moderate penalty
-        raw = 0.70 + (win_rate - 0.25) * 1.5  # 0.70 at 25%, 0.85 at 35%
+    if win_rate >= 0.30:
+        # Moderate penalty — clearly losing
+        raw = 0.65 + (win_rate - 0.30) * 1.5  # 0.65 at 30%, 0.80 at 40%
         return 1.0 - (1.0 - raw) * confidence
 
-    # Heavy penalty
-    raw = max(0.55, win_rate * 2.2)  # floors at 0.55
+    # Heavy penalty — this dimension is a dumpster fire
+    raw = max(0.45, win_rate * 1.5)  # floors at 0.45
     return 1.0 - (1.0 - raw) * confidence
 
 

@@ -12,6 +12,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from esporf.analysis.context import MatchContext
     from esporf.analysis.feedback import FeedbackAnalyzer
 
 logger = logging.getLogger(__name__)
@@ -757,6 +758,7 @@ class MatchupReport:
     form_modifier: float = 1.0  # combined form quality of both players
     skip_reason: str | None = None  # set when a player is BLOCKED or skipped
     feedback_analyzer: FeedbackAnalyzer | None = None
+    match_context: MatchContext | None = None  # contextual modifiers
 
     @property
     def has_trends(self) -> bool:
@@ -1029,6 +1031,16 @@ class MatchupReport:
             except Exception:
                 logger.debug("Feedback penalty failed for %s", best_market, exc_info=True)
 
+        # Apply contextual modifiers (time-of-day, fatigue, streaks, variance)
+        if self.match_context is not None:
+            adjusted_score *= self.match_context.combined_modifier
+
+        # Apply correlation discount — when multiple trends on the same
+        # market are from the same direction (e.g. 3 "Over" trends from
+        # h2h, player_overall, player_home), they're correlated signals,
+        # not independent evidence. Discount the agreement component.
+        adjusted_score *= _correlation_discount(best_trends)
+
         return BetPick(
             market=best_market,
             confidence=adjusted_score,
@@ -1041,6 +1053,38 @@ class MatchupReport:
             _spread_side=best_spread_side,
             edge=best_edge,
         )
+
+def _correlation_discount(trends: list[Trend]) -> float:
+    """Apply diminishing returns when multiple trends share the same source type.
+
+    If all 5 trends backing a pick come from internal DB data (h2h,
+    player_overall, player_home, player_away), they're drawing from
+    overlapping match sets — the 5th trend adds less information than
+    the 1st. External sources (TotalCorner, Forebet) are independent
+    and don't trigger correlation discounts.
+
+    Returns a multiplier (0.85-1.0). More correlated → lower multiplier.
+    """
+    internal_types = {"h2h", "player_overall", "player_home", "player_away"}
+    internal_count = sum(1 for t in trends if t.trend_type in internal_types)
+    external_count = len(trends) - internal_count
+
+    if internal_count <= 2:
+        return 1.0  # 2 or fewer internal signals — no discount
+
+    # Each internal trend beyond the 2nd gets diminishing credit.
+    # 3 internal = 0.98, 4 = 0.95, 5+ = 0.92
+    excess = internal_count - 2
+    discount = max(0.85, 1.0 - excess * 0.03)
+
+    # External sources partially offset the discount (independent data)
+    if external_count >= 2:
+        discount = min(1.0, discount + 0.04)
+    elif external_count == 1:
+        discount = min(1.0, discount + 0.02)
+
+    return discount
+
 
 def _trend_source_label(trend_type: str) -> str:
     return {
