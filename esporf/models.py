@@ -806,13 +806,18 @@ class MatchupReport:
         not just edge. A +130 line with 20% edge is far more valuable than
         a -240 line with 10% edge.
 
-        Minimum 8% edge required — smaller edges get eaten by vig/variance.
-        At least 2 trends must agree on a market to recommend it.
-        Max juice is -150 (decimal 1.667) — anything worse is rejected.
+        Gates (all must pass for a pick to be made):
+        - Minimum 15% edge — smaller edges get eaten by vig/variance.
+        - At least 3 real trends must agree on a market.
+        - Max juice -130 (decimal 1.769) — anything worse is rejected.
+        - Minimum EV of +$0.03/unit — ensures the math actually favors us.
+        - Minimum 0.55 final confidence after all multipliers.
         """
-        MIN_EDGE = 0.12  # 12% minimum edge to recommend (up from 8%)
-        MAX_JUICE_ODDS = 1.667  # -150 American; reject anything below
+        MIN_EDGE = 0.15  # 15% minimum edge to recommend (up from 12%)
+        MAX_JUICE_ODDS = 1.769  # -130 American; reject anything below (up from -150)
         MIN_REAL_TRENDS = 3  # minimum real (non-synthetic) trends backing a pick
+        MIN_EV_PER_UNIT = 0.03  # minimum expected value per unit wagered
+        MIN_CONFIDENCE = 0.55  # minimum final confidence after all multipliers
 
         best_market: str | None = None
         best_score = 0.0
@@ -878,6 +883,9 @@ class MatchupReport:
                 payout = dec_odds - 1.0
                 ev_per_unit = (avg_rate * payout) - (1.0 - avg_rate)
 
+                if ev_per_unit < MIN_EV_PER_UNIT:
+                    continue  # math doesn't favor us enough after juice
+
                 # Score: 35% EV quality, 25% edge, 20% agreement, 20% hit rate
                 # EV quality normalized: +0.50/u or more = perfect score
                 ev_norm = min(max(ev_per_unit, 0.0) / 0.50, 1.0)
@@ -920,7 +928,7 @@ class MatchupReport:
                     dec_odds = spread.away_odds
 
                 if dec_odds < MAX_JUICE_ODDS:
-                    continue  # juice worse than -150
+                    continue  # juice worse than -130
 
                 edge = avg_rate - implied
                 if edge < MIN_EDGE:
@@ -928,6 +936,9 @@ class MatchupReport:
 
                 payout = dec_odds - 1.0
                 ev_per_unit = (avg_rate * payout) - (1.0 - avg_rate)
+
+                if ev_per_unit < MIN_EV_PER_UNIT:
+                    continue  # math doesn't favor us enough after juice
 
                 ev_norm = min(max(ev_per_unit, 0.0) / 0.50, 1.0)
                 edge_norm = min(edge / 0.30, 1.0)
@@ -959,10 +970,16 @@ class MatchupReport:
                     continue
                 ml_dec = _get_moneyline_dec_odds(market, ml, self.match)
                 if ml_dec is not None and ml_dec < MAX_JUICE_ODDS:
-                    continue  # juice worse than -150
+                    continue  # juice worse than -130
                 edge = avg_rate - implied
                 if edge < MIN_EDGE:
                     continue
+                # EV gate for moneyline markets
+                if ml_dec is not None and ml_dec > 1.0:
+                    ml_payout = ml_dec - 1.0
+                    ml_ev = (avg_rate * ml_payout) - (1.0 - avg_rate)
+                    if ml_ev < MIN_EV_PER_UNIT:
+                        continue  # math doesn't favor us enough
                 edge_norm = min(edge / 0.30, 1.0)
                 score = (
                     edge_norm * 0.35
@@ -1040,6 +1057,17 @@ class MatchupReport:
         # h2h, player_overall, player_home), they're correlated signals,
         # not independent evidence. Discount the agreement component.
         adjusted_score *= _correlation_discount(best_trends)
+
+        # Confidence floor — reject picks that scored well on raw metrics
+        # but got penalized below viability by form/feedback/context.
+        # At standard -110 juice you need ~52.4% to break even; 0.55
+        # ensures we only take picks with meaningful conviction.
+        if adjusted_score < MIN_CONFIDENCE:
+            logger.debug(
+                "Rejected %s — confidence %.2f below floor %.2f",
+                best_market, adjusted_score, MIN_CONFIDENCE,
+            )
+            return None
 
         return BetPick(
             market=best_market,
